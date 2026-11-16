@@ -393,6 +393,7 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self.ag_text = ""
         self.ag_busy = False
         self._ag_polling = False
+        self.ag_update: str | None = None
         self.settings = self.m.store.settings()
         self.quitting = False
         self.paused = 0
@@ -553,6 +554,14 @@ class TrayApp(QtCore.QObject if QtCore else object):
         if err or st is None:
             return
         self.ag_text = st.text
+        if st.update != self.ag_update:
+            self.ag_update = st.update
+            self._build_menu()
+        if st.update and self.settings.get("adguard_update_notified") != st.update:
+            self.set_setting("adguard_update_notified", st.update)
+            self.tray.showMessage("AdGuard update", f"AdGuard {st.update} is available. Tray menu → "
+                                  f"Update AdGuard to {st.update}…",
+                                  QtWidgets.QSystemTrayIcon.Information, 8000)
         state = adguard.effective_state(st.state, self.settings)
         if state == adguard.PAUSED and adguard.pause_due(self.settings):
             self.adguard_do("resume", notify="AdGuard protection is back on.")
@@ -583,6 +592,8 @@ class TrayApp(QtCore.QObject if QtCore else object):
         elif st == adguard.PAUSED:
             r = m.addAction("Resume AdGuard now", lambda: self.adguard_do("resume"))
             r.setEnabled(not self.ag_busy)
+        if self.ag_update:
+            m.addAction(f"Update AdGuard to {self.ag_update}…", self.adguard_update)
         more = m.addMenu("AdGuard")
         more.addAction("Check HTTPS filtering…", self.adguard_https_check)
         more.addAction("Exclude an app from HTTPS filtering…", self.adguard_exclude)
@@ -592,8 +603,16 @@ class TrayApp(QtCore.QObject if QtCore else object):
                        lambda: self.adguard_output("AdGuard updates", self.ag.check_update))
         more.addAction("Connect the AdGuard browser extension",
                        lambda: self.adguard_output("Browser extension", self.ag.install_browser_integration))
+        more.addAction("License information",
+                       lambda: self.adguard_output("License", self.ag.license))
+        more.addSeparator()
+        more.addAction("Set up the HTTPS filtering certificate…",
+                       lambda: self._adguard_terminal(self.ag.argv("cert")))
+        more.addAction("Start AdGuard when the computer starts…",
+                       lambda: self._adguard_terminal(self.ag.argv("install-service")))
+        more.addAction("Update AdGuard…", self.adguard_update)
         more.addAction("Run AdGuard setup in a terminal…",
-                       lambda: self._adguard_terminal([self.ag.path() or adguard.CLI, "configure"]))
+                       lambda: self._adguard_terminal(self.ag.argv("configure")))
         more.addSeparator()
         show = more.addAction("Show status on the tray icon")
         show.setCheckable(True)
@@ -672,6 +691,13 @@ class TrayApp(QtCore.QObject if QtCore else object):
         if not adguard.open_terminal(self.ag.host, argv):
             QtWidgets.QMessageBox.information(self.window, "AdGuard", "No terminal app found. Run "
                                               "this in a terminal:\n\n" + " ".join(argv))
+
+    def adguard_update(self) -> None:
+        """``adguard-cli update`` in a terminal: it may ask for a password and shows progress."""
+        self._adguard_terminal(self.ag.argv("update"))
+        self.ag.update_available = None             # re-learned from the next output if still due
+        self.ag_update = None
+        self._build_menu()
 
     def adguard_output(self, title: str, fn) -> None:
         from .ui_adguard import TextDialog

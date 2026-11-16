@@ -507,6 +507,9 @@ def cmd_adguard(m: Manager, a, out: Out) -> int:
     state = adguard.effective_state(st.state, settings)
     m.store.save()
     out.say(f"AdGuard: {adguard.describe(state, settings)}")
+    if st.update:
+        out.say(f"AdGuard {st.update} is available: run 'adguard-cli update'")
+    out.put("update", st.update)
     out.put("state", state)
     out.put("status", st.text)
     return EXIT_OK

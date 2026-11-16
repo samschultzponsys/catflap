@@ -479,9 +479,14 @@ class FakeAdGuard:
         self.host = adguard.Host(flatpak=False)
         self.fail_start = None
 
+    update = None
+
     def status(self):
         from catflap.adguard import CliStatus
-        return CliStatus(self.state, f"status: {self.state}")
+        return CliStatus(self.state, f"status: {self.state}", self.update)
+
+    def argv(self, *args):
+        return ["adguard-cli", *args]
 
     def path(self, refresh=False):
         return "/usr/local/bin/adguard-cli"
@@ -583,3 +588,25 @@ def test_tray_without_adguard_has_no_section(qapp, manager):
     wait_for(qapp, lambda: not app._ag_polling)
     assert not any("AdGuard" in t for t in _labels(app.menu))
     assert "AdGuard" not in app.tray.toolTip()
+
+
+@linux_only
+def test_tray_adguard_update_notice(qapp, manager, monkeypatch):
+    from catflap import adguard
+    ag = FakeAdGuard("on")
+    ag.update = "1.5.1"
+    opened = []
+    monkeypatch.setattr(adguard, "open_terminal", lambda host, argv, title="": opened.append(argv) or True)
+    shown = []
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    monkeypatch.setattr(app.tray, "showMessage", lambda *a, **k: shown.append(a[1]))
+    wait_for(qapp, lambda: not app._ag_polling)
+    app.poll_adguard()
+    wait_for(qapp, lambda: "Update AdGuard to 1.5.1…" in _labels(app.menu))
+    assert app.settings["adguard_update_notified"] == "1.5.1"
+    app.poll_adguard()
+    wait_for(qapp, lambda: not app._ag_polling)
+    assert len([m for m in shown if "1.5.1" in m]) <= 1              # told once per version
+    next(a for a in app.menu.actions() if a.text() == "Update AdGuard to 1.5.1…").trigger()
+    assert opened == [["adguard-cli", "update"]]
