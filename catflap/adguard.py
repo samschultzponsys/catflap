@@ -196,16 +196,50 @@ def scratch_dir() -> Path:
 
 
 # ============================================================ adguard-cli
+_UPDATE_RE = re.compile(r"^\s*>?\s*AdGuard CLI v?(\d[\w.\-]*) is now available.*$", re.I | re.M)
+_UPDATE_HINT_RE = re.compile(r"^.*You can update AdGuard CLI by running.*$\n?", re.I | re.M)
+
+
+def split_notice(text: str) -> tuple[str, str | None]:
+    """(output without adguard-cli's "update available" notice, the new version or None).
+
+    adguard-cli 1.5 appends to every command's output:
+    ``> AdGuard CLI v1.5.1 is now available`` / ``You can update AdGuard CLI by running ...``"""
+    m = _UPDATE_RE.search(text)
+    clean = _UPDATE_HINT_RE.sub("", _UPDATE_RE.sub("", text))
+    return clean.strip(), (m.group(1) if m else None)
+
+
 def parse_status(rc: int, text: str) -> str:
-    """ON / OFF / UNKNOWN from ``adguard-cli status``. The wording isn't documented,
-    so this looks for the obvious words and treats anything else as unknown."""
-    t = text.lower()
-    if re.search(r"\b(not running|isn't running|is not running|stopped|inactive|disabled|"
-                 r"not active|not started|is off|turned off)\b", t):
+    """ON / OFF / UNKNOWN from ``adguard-cli status``.
+
+    adguard-cli 1.5 says "The AdGuard proxy server is running" followed by lines
+    about each feature ("Manual DNS proxy is disabled" ...), so the proxy line
+    decides; the other lines must not be mistaken for the overall state."""
+    t = split_notice(text)[0].lower()
+    m = re.search(r"proxy server (?:is|was)\s+(not\s+running|running|stopped|not started)", t)
+    if m:
+        return ON if m.group(1) == "running" else OFF
+    first = next((line for line in t.splitlines() if line.strip()), "")
+    if re.search(r"\b(not running|isn't running|stopped|inactive|not active|not started|"
+                 r"is off|turned off)\b", first):
         return OFF
-    if re.search(r"\b(running|active|enabled|started|is on|protection is on)\b", t):
+    if re.search(r"\b(running|active|started|is on)\b", first):
         return ON
     return UNKNOWN
+
+
+def parse_details(text: str) -> dict[str, Any]:
+    """Extra facts from ``adguard-cli status`` (1.5): proxy port, automatic mode."""
+    t = text.lower()
+    out: dict[str, Any] = {}
+    m = re.search(r"http proxy is listening on [\w.:\[\]]*?:(\d{2,5})", t)
+    if m:
+        out["http_port"] = int(m.group(1))
+    m = re.search(r"system-wide automatic filtering is (enabled|disabled)", t)
+    if m:
+        out["auto"] = m.group(1) == "enabled"
+    return out
 
 
 def _needs_terminal(text: str) -> bool:
@@ -213,6 +247,10 @@ def _needs_terminal(text: str) -> bool:
     return any(k in t for k in ("a terminal is required", "no tty present", "askpass",
                                 "password is required", "a password is required",
                                 "sudo: no password", "unable to read password"))
+
+
+def version_key(v: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", v)[:4])
 
 
 def find_askpass(host: Host) -> str | None:
@@ -226,6 +264,8 @@ def find_askpass(host: Host) -> str | None:
 class CliStatus:
     state: str
     text: str = ""
+    update: str | None = None          # newer adguard-cli version, if it says so
+    details: dict = field(default_factory=dict)
 
 
 class AdGuard:
@@ -236,6 +276,9 @@ class AdGuard:
         self._path: str | None = None
         self._looked = 0.0
         self._askpass: str | None = None
+        self.update_available: str | None = None
+        self._port: int | None = None
+        self._version_checked = 0.0
 
     # -- finding it
     def path(self, refresh: bool = False) -> str | None:
@@ -280,19 +323,45 @@ class AdGuard:
         if not self.path():
             return CliStatus(MISSING)
         r = self.run("status", timeout=20)
-        text = r.text
+        text, update = split_notice(r.text)
         state = parse_status(r.rc, text)
         if state == UNKNOWN and r.rc != 0 and not text:
             state = OFF
-        return CliStatus(state, text)
+        if update:
+            self.update_available = update
+        elif self.update_available and (not self._version_checked
+                                        or time.monotonic() - self._version_checked > 600):
+            self._version_checked = time.monotonic()
+            have = self.version()
+            if have and version_key(have) >= version_key(self.update_available):
+                self.update_available = None        # updated meanwhile
+        st = CliStatus(state, text, update or self.update_available, parse_details(text))
+        if "http_port" in st.details:
+            self._port = st.details["http_port"]
+        return st
 
     def _act(self, *args: str, timeout: float = 90) -> str:
         r = self.run(*args, timeout=timeout)
+        text, update = split_notice(r.text)
+        if update:
+            self.update_available = update
         if r.rc != 0:
-            if _needs_terminal(r.text):
-                raise NeedsTerminal([self.path() or CLI, *args], r.text)
-            raise AdGuardError(r.text or f"adguard-cli {' '.join(args)} failed (exit {r.rc})")
-        return r.text
+            if _needs_terminal(text):
+                raise NeedsTerminal([self.path() or CLI, *args], text)
+            raise AdGuardError(text or f"adguard-cli {' '.join(args)} failed (exit {r.rc})")
+        return text
+
+    def version(self) -> str | None:
+        """Installed version, e.g. "1.5.0" (from ``adguard-cli --version``)."""
+        m = re.search(r"AdGuard CLI v?(\d[\w.\-]*)", split_notice(self.run("--version", timeout=20).text)[0])
+        return m.group(1) if m else None
+
+    def license(self) -> str:
+        return self._act("license", timeout=30)
+
+    def argv(self, *args: str) -> list[str]:
+        """Full command line, for running in a terminal."""
+        return [self.path() or CLI, *args]
 
     def start(self) -> str:
         return self._act("start")
@@ -314,7 +383,7 @@ class AdGuard:
 
     def config_get(self, key: str) -> str:
         r = self.run("config", "get", key, timeout=20)
-        return r.out.strip() if r.rc == 0 else ""
+        return split_notice(r.out)[0] if r.rc == 0 else ""
 
     def config_location(self) -> str | None:
         r = self.run("config", "show", timeout=20)
@@ -328,6 +397,8 @@ class AdGuard:
         return None
 
     def proxy_port(self) -> int | None:
+        if self._port:
+            return self._port
         m = re.findall(r"\d{2,5}", self.config_get("listen_ports.http_proxy"))
         return int(m[-1]) if m else None
 
@@ -740,8 +811,10 @@ def https_report(ag: AdGuard, gateways: dict[str, dict] | None = None,
                 break
     if ca is None:
         rep.add("ca", "AdGuard's certificate", BAD if pr.intercepted else INFO,
-                "Couldn't get AdGuard's certificate. With protection and HTTPS filtering on, open "
-                "http://local.adguard.org/cert in a browser to download it.")
+                "Couldn't get AdGuard's certificate. AdGuard can create and install it "
+                "('adguard-cli cert'); or, with protection and HTTPS filtering on, open "
+                "http://local.adguard.org/cert in a browser to download it.",
+                fix="cert", fix_label="Run AdGuard's certificate setup")
         return rep
     rep.ca = ca
     rep.ca_file = save_ca(ca)
@@ -907,4 +980,9 @@ def apply_fix(ag: AdGuard, check: Check, report: Report) -> str:
         return f"Added to {check.title}. Restart that browser."
     if check.fix == "exclude":
         return exclude_app(ag, check.target)
+    if check.fix == "cert":
+        if not open_terminal(ag.host, ag.argv("cert"), "AdGuard: certificate for HTTPS filtering"):
+            raise AdGuardError("No terminal app found. Run this in a terminal: adguard-cli cert")
+        return ("A terminal opened with AdGuard's certificate setup (adguard-cli cert). When it "
+                "has finished, click Check again.")
     raise AdGuardError(f"nothing to fix for {check.title}")

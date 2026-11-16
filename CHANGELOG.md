@@ -28,6 +28,11 @@ Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
   the connection to your gateway, CatFlap now says exactly that and how to exclude it,
   instead of *gateway TLS certificate changed*. Adding a gateway never pins AdGuard's
   stand-in certificate by mistake.
+- **AdGuard updates:** when `adguard-cli` says a newer version is available, the tray menu
+  shows **Update AdGuard to X…** (runs `adguard-cli update` in a terminal) and CatFlap
+  notifies you once per version. The AdGuard submenu also has *License information*,
+  *Set up the HTTPS filtering certificate…* (`cert`) and *Start AdGuard when the computer
+  starts…* (`install-service`). Status is read from AdGuard CLI 1.5's actual output.
 - **New command:** `catflap adguard [status|on|off|pause [MIN]|resume|https-check|exclude APP]`.
 - **Other software list:** AdGuard Ad Blocker (Windows) and AdGuard for Linux are listed
   as *works alongside CatFlap*, with no uninstall box and no popup. AdGuard VPN is listed

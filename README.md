@@ -648,10 +648,17 @@ Hovering the icon says the same in words (*AdGuard: Paused, 8 min left*).
   protection and turns it back on when the time is up (CatFlap must be running then).
   **Resume AdGuard now** ends a pause early. If AdGuard is started some other way while
   paused, the pause is forgotten.
+- **Update AdGuard to X…**: appears when `adguard-cli` reports a newer version (CatFlap
+  also shows a notification, once per version). It runs `adguard-cli update` in a
+  terminal so you can see progress and type your password if asked.
 - **AdGuard ▸** *Check HTTPS filtering…*, *Exclude an app from HTTPS filtering…*,
   *Show filter lists*, *Check for AdGuard and filter updates*, *Connect the AdGuard
-  browser extension* (`install-browser-integration`), *Run AdGuard setup in a
-  terminal…* (`configure`), and *Show status on the tray icon*.
+  browser extension* (`install-browser-integration`), *License information*
+  (`license`), and in a terminal: *Set up the HTTPS filtering certificate…* (`cert`),
+  *Start AdGuard when the computer starts…* (`install-service`), *Update AdGuard…*
+  (`update`), *Run AdGuard setup…* (`configure`). Last, *Show status on the tray icon*.
+
+Tested with AdGuard CLI 1.5.
 
 **If AdGuard asks for your password** (its automatic proxy mode uses `sudo`): CatFlap
 lets sudo ask in a window when a graphical password helper is installed
@@ -700,7 +707,9 @@ often breaks things:
 - **Show certificate file:** CatFlap saves AdGuard's certificate to
   `~/.cache/catflap/adguard-personal-ca.pem` for importing by hand.
 
-CatFlap gets AdGuard's certificate from `http://local.adguard.org/cert`, a page AdGuard
+If CatFlap can't find AdGuard's certificate at all, the check offers **Run AdGuard's
+certificate setup** (`adguard-cli cert`, in a terminal); click **Check again** when it's
+done. CatFlap gets AdGuard's certificate from `http://local.adguard.org/cert`, a page AdGuard
 itself answers while it's filtering, so turn protection on before checking.
 
 **Your gateways and HTTPS filtering.** CatFlap pins your gateway's certificate, so it
@@ -758,7 +767,7 @@ Exit codes: `0` ok, `1` error, `2` usage, `3` checks failed.
 | `catflap import-bundle FILE [--overwrite] [--no-install]` | Import an export |
 | `catflap suggest-subnet N` | Suggest `10.250.N.0/28` and check it's free |
 | `catflap tray [--minimized]` | Start the tray app |
-| `catflap adguard [status]` | AdGuard for Linux: its state (*Protecting*, *Paused…*, *Turned off*) |
+| `catflap adguard [status]` | AdGuard for Linux: its state (*Protecting*, *Paused…*, *Turned off*), and whether an AdGuard update is available |
 | `catflap adguard on \| off` | Turn AdGuard protection on or off |
 | `catflap adguard pause [MINUTES\|forever]` | Pause protection; the tray app resumes it when the time is up |
 | `catflap adguard resume` | End a pause now |

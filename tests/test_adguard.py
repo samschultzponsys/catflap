@@ -26,7 +26,16 @@ state="$AG_DIR/state"
 echo "$@" >> "$AG_DIR/calls"
 case "$1" in
   status)
-    if [ "$(cat "$state")" = on ]; then echo "AdGuard protection is running on port 3129"; else echo "AdGuard is not running"; fi ;;
+    if [ "$(cat "$state")" = on ]; then
+      printf '%s\n' "The AdGuard proxy server is running" "HTTP proxy is listening on 127.0.0.1:3129" \
+        "Manual DNS proxy is disabled" "System-wide automatic filtering is enabled" \
+        "System-wide DNS filtering is disabled"
+    else echo "The AdGuard proxy server is not running"; fi
+    if [ -f "$AG_DIR/update" ]; then
+      printf '\n%s\n%s\n' "> AdGuard CLI v$(cat "$AG_DIR/update") is now available" \
+        "You can update AdGuard CLI by running \`adguard-cli update\`"
+    fi ;;
+  --version) echo "AdGuard CLI v$(cat "$AG_DIR/version" 2>/dev/null || echo 1.5.0)" ;;
   start)
     if [ -f "$AG_DIR/needs-sudo" ]; then echo "sudo: a terminal is required to read the password" >&2; exit 1; fi
     echo on > "$state"; echo "Started" ;;
@@ -57,12 +66,30 @@ def fake_cli(tmp_path, monkeypatch):
     return d
 
 
-def test_parse_status_words():
-    assert adguard.parse_status(0, "AdGuard protection is running") == adguard.ON
-    assert adguard.parse_status(0, "AdGuard is not running") == adguard.OFF
+REAL_STATUS = """The AdGuard proxy server is running
+HTTP proxy is listening on 127.0.0.1:3129
+SOCKS5 proxy is listening on 127.0.0.1:1081
+Manual DNS proxy is disabled
+System-wide automatic filtering is enabled
+System-wide DNS filtering is disabled
+You can stop the proxy server by running `adguard-cli stop`
+
+> AdGuard CLI v1.5.1 is now available
+You can update AdGuard CLI by running `adguard-cli update`
+"""
+
+
+def test_parse_status_adguard_cli_1_5():
+    # "... is disabled" lines are about single features, not the proxy itself.
+    assert adguard.parse_status(0, REAL_STATUS) == adguard.ON
+    text, update = adguard.split_notice(REAL_STATUS)
+    assert update == "1.5.1" and "now available" not in text and "update AdGuard" not in text
+    assert text.endswith("by running `adguard-cli stop`")
+    assert adguard.parse_details(text) == {"http_port": 3129, "auto": True}
+    assert adguard.parse_status(0, "The AdGuard proxy server is not running") == adguard.OFF
     assert adguard.parse_status(1, "Protection: stopped") == adguard.OFF
-    assert adguard.parse_status(0, "Protection is enabled") == adguard.ON
     assert adguard.parse_status(0, "hello") == adguard.UNKNOWN
+    assert adguard.split_notice("plain") == ("plain", None)
 
 
 def test_status_on_off_pause_resume(fake_cli):
@@ -92,6 +119,20 @@ def test_started_elsewhere_ends_the_pause():
     settings = {adguard.PAUSE_KEY: 99999999999}
     assert adguard.effective_state(adguard.ON, settings) == adguard.ON
     assert adguard.PAUSE_KEY not in settings
+
+
+def test_update_notice_comes_and_goes(fake_cli, monkeypatch):
+    (fake_cli / "update").write_text("1.5.1")
+    (fake_cli / "state").write_text("on\n")
+    ag = adguard.AdGuard(adguard.Host(flatpak=False))
+    st = ag.status()
+    assert st.update == "1.5.1" and "available" not in st.text and st.details["http_port"] == 3129
+    assert ag.proxy_port() == 3129
+    (fake_cli / "update").unlink()
+    assert ag.status().update == "1.5.1"            # still due: 1.5.0 is installed
+    (fake_cli / "version").write_text("1.5.1")
+    ag._version_checked = 0.0
+    assert ag.version() == "1.5.1" and ag.status().update is None
 
 
 def test_password_prompt_means_terminal(fake_cli):
