@@ -828,7 +828,10 @@ ever sees the public key.
 
 - Versions are **`MAJOR.MINOR`**. The minor number runs 0–9 and then rolls over:
   `1.1 → 1.2 → … → 1.9 → 2.0`. Every release is tagged `vMAJOR.MINOR`.
-- CatFlap checks GitHub for a newer release once a day; you can turn this off in the tray settings.
+- CatFlap checks GitHub for a newer release every time it starts and every 6 hours while
+  it runs; you can turn this off in the tray settings. The first time it finds a new
+  version it opens the update window; after that it reminds you with a notification and
+  the tray menu's **Update to X…** item.
   `catflap update --check` checks on demand.
 - CatFlap **detects how it was installed** and updates accordingly. The method is
   shown by `catflap version` and in **Help → About**:

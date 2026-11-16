@@ -3,6 +3,14 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.0
+
+- **Update checks you can't miss.** Every time CatFlap starts it asks GitHub for the newest
+  release (it used to reuse the previous day's answer, so a new release could go unseen
+  for up to a day), and it checks again every 6 hours while it runs. The first time
+  it sees a new version, it opens the update window; after that, a notification and the
+  tray menu's **Update to X…** item remind you. Same on Windows and Linux.
+
 ## 1.9
 
 - **Flatpak: CatFlap asks for AdGuard permission as soon as it sees AdGuard.** The sandbox

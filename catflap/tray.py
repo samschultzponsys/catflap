@@ -12,7 +12,7 @@ Windows uses the notification area.
 * Tray icon: the cat is a grey outline when nothing is connected, and turns
   the site's color when connected (striped for several sites); red badge after
   a failure.
-* Notifications, start-at-login, daily update check with install-aware
+* Notifications, start-at-login, update check at start-up and every 6 hours, with install-aware
   update instructions.
 * Linux with AdGuard for Linux (adguard-cli) installed: an AdGuard section in
   the tray menu (on/off, pause, HTTPS filtering check) and a shield in the
@@ -380,6 +380,7 @@ class MainWindow(QtWidgets.QMainWindow if QtWidgets else object):
 # ============================================================ tray app
 class TrayApp(QtCore.QObject if QtCore else object):
     POLL_MS = 5000
+    UPDATE_CHECK_MS = 6 * 3600 * 1000   # while running, look for a new release every 6 hours
     INSTALL_CHECK_MS = 60_000      # look for a newer installed CatFlap every minute
     SANDBOX_DETECT_S = 300         # Flatpak without permission: look for AdGuard every 5 min
     CYCLE_MS = 100          # tray color cycling: 100 ms steps,
@@ -426,7 +427,11 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self._render()
         self.poll()
         if self.settings.get("update_check", True):
+            # Every start asks GitHub afresh (not yesterday's answer), then every few hours.
             QtCore.QTimer.singleShot(3000, lambda: self.check_updates(interactive=False))
+        self._update_timer = QtCore.QTimer(self)
+        self._update_timer.timeout.connect(self._periodic_update_check)
+        self._update_timer.start(self.UPDATE_CHECK_MS)
         # Restart by ourselves when a newer CatFlap gets installed while we run
         # (from the update window, a terminal, Discover or dnf).
         self._restarting = False
@@ -990,8 +995,13 @@ class TrayApp(QtCore.QObject if QtCore else object):
         return True
 
     def check_updates(self, interactive: bool) -> None:
-        run_bg(lambda: update.check(self.settings, force=interactive),
+        # Always a fresh look at GitHub: at start-up, every few hours, and on request.
+        run_bg(lambda: update.check(self.settings, force=True),
                lambda r, e: self._update_checked(r, e, interactive))
+
+    def _periodic_update_check(self) -> None:
+        if self.settings.get("update_check", True) and not self._restarting:
+            self.check_updates(interactive=False)
 
     def _update_checked(self, st, err, interactive: bool) -> None:
         self.m.store.save()
@@ -1005,9 +1015,15 @@ class TrayApp(QtCore.QObject if QtCore else object):
                                                   st.error or f"CatFlap {st.current} is up to date.")
             return
         if not interactive:
-            self.tray.showMessage("CatFlap update", f"Version {st.latest.version} is available.",
-                                  QtWidgets.QSystemTrayIcon.Information)
-            return
+            # The first time a version is seen, open the update window so it can't be
+            # missed; after that, a notification and the tray menu item are enough.
+            if self.settings.get("update_offered") != st.latest.version and not self.paused:
+                self.set_setting("update_offered", st.latest.version)
+            else:
+                self.tray.showMessage("CatFlap update", f"Version {st.latest.version} is available. "
+                                      "Click here, or use the tray menu, to update.",
+                                      QtWidgets.QSystemTrayIcon.Information)
+                return
         from .ui_update import UpdateDialog
         dlg = UpdateDialog(st, self.window, self.settings)
         self.run_dialog(dlg)

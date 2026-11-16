@@ -688,3 +688,37 @@ def test_restarts_when_a_newer_version_is_installed(qapp, manager, monkeypatch):
     app.check_installed_version()
     wait_for(qapp, lambda: started)
     assert quits == [True] and manager.store.settings()["pending_update"] == "99.0"
+
+
+def test_update_check_is_fresh_and_opens_the_window_once_per_version(qapp, manager, monkeypatch):
+    from catflap import update, ui_update
+    from catflap.update import InstallInfo, ReleaseInfo, UpdateStatus
+    calls, opened, shown = [], [], []
+
+    def fake_check(settings, force=False, **kw):
+        calls.append(force)
+        st = UpdateStatus(current="1.9", install=InstallInfo("rpm"))
+        st.latest = ReleaseInfo(version="2.0", url="u", notes="", assets={})
+        st.available = True
+        return st
+    monkeypatch.setattr(update, "check", fake_check)
+
+    class FakeDialog:
+        restart_requested = False
+
+        def __init__(self, st, parent, settings):
+            opened.append(st.latest.version)
+
+        def exec(self):
+            return 0
+    monkeypatch.setattr(ui_update, "UpdateDialog", FakeDialog)
+    app = tray.TrayApp(qapp, manager, adguard_cli=FakeAdGuard("missing"))
+    app.timer.stop()
+    monkeypatch.setattr(app.tray, "showMessage", lambda *a, **k: shown.append(a[1]))
+    app.check_updates(interactive=False)                       # e.g. at start-up
+    wait_for(qapp, lambda: opened)
+    assert calls == [True] and opened == ["2.0"]               # asked GitHub, not the cache
+    assert manager.store.settings()["update_offered"] == "2.0"
+    app._periodic_update_check()                               # hours later: same version
+    wait_for(qapp, lambda: shown)
+    assert opened == ["2.0"] and "2.0" in shown[0] and calls == [True, True]
