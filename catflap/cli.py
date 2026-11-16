@@ -460,6 +460,58 @@ def cmd_suggest_subnet(m: Manager, a, out: Out) -> int:
     return EXIT_OK
 
 
+def cmd_adguard(m: Manager, a, out: Out) -> int:
+    from . import adguard
+    ag = adguard.AdGuard()
+    settings = m.store.settings()
+    if a.action == "https-check":
+        rep = adguard.https_report(ag, m.store.gateways())
+        marks = {adguard.OK: "ok  ", adguard.BAD: "FIX ", adguard.INFO: "info"}
+        for c in rep.checks:
+            out.say(f"[{marks[c.result]}] {c.title}: {c.detail}")
+            if c.fix == "exclude":
+                out.say(f"       fix: catflap adguard exclude '{c.target}'")
+            elif c.fix:
+                out.say(f"       fix: {c.fix_label} (use the tray: AdGuard → Check HTTPS filtering…)")
+        out.put("checks", [{"title": c.title, "result": c.result, "detail": c.detail,
+                            "fix": c.fix, "target": c.target} for c in rep.checks])
+        return EXIT_CHECKS if rep.problems else EXIT_OK
+    st = ag.status()
+    if st.state in (adguard.MISSING, adguard.NO_ACCESS):
+        msg = ("adguard-cli isn't installed" if st.state == adguard.MISSING else
+               "the Flatpak can't run adguard-cli; allow it with: " + adguard.FLATPAK_OVERRIDE)
+        raise CatflapError(msg)
+    try:
+        if a.action == "on":
+            adguard.resume(ag, settings)
+        elif a.action == "off":
+            adguard.turn_off(ag, settings)
+        elif a.action == "pause":
+            mins = None if a.arg in (None, "forever") else float(a.arg)
+            adguard.pause(ag, settings, None if mins is None else mins * 60)
+            out.say("Paused. CatFlap's tray app turns AdGuard back on when the time is up"
+                    if mins is not None else "Paused until 'catflap adguard resume'.")
+        elif a.action == "resume":
+            adguard.resume(ag, settings)
+        elif a.action == "exclude":
+            if not a.arg:
+                raise ValueError("name the app to exclude, e.g. catflap adguard exclude discord")
+            out.say(adguard.exclude_app(ag, a.arg, "bypass" if a.all else "bypass_https"))
+    except adguard.NeedsTerminal as e:
+        raise CatflapError("AdGuard needs your password: run '" + " ".join(e.argv)
+                           + "' in a terminal") from None
+    except adguard.AdGuardError as e:
+        raise CatflapError(str(e)) from None
+    m.store.save()
+    st = ag.status()
+    state = adguard.effective_state(st.state, settings)
+    m.store.save()
+    out.say(f"AdGuard: {adguard.describe(state, settings)}")
+    out.put("state", state)
+    out.put("status", st.text)
+    return EXIT_OK
+
+
 def cmd_tray(m: Manager, a, out: Out) -> int:
     from .tray import main as tray_main
     return tray_main(["--minimized"] if a.minimized else [])
@@ -619,6 +671,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("remove-tunnels", help="Windows: delete CatFlap's tunnel services and "
                        "WireGuard engine (used by the uninstaller; profiles are kept)")
     p.set_defaults(fn=cmd_remove_tunnels)
+    p = sub.add_parser("adguard", help="AdGuard for Linux (adguard-cli): status, on/off, pause, "
+                       "HTTPS filtering check")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=("status", "on", "off", "pause", "resume", "https-check", "exclude"))
+    p.add_argument("arg", nargs="?", help="pause: minutes, or 'forever' (default); "
+                   "exclude: the program's executable name (e.g. discord, 'python3*')")
+    p.add_argument("--all", action="store_true", help="exclude: don't filter the app at all, "
+                   "not only its HTTPS")
+    p.set_defaults(fn=cmd_adguard)
     p = sub.add_parser("tray", help="start the tray app")
     p.add_argument("--minimized", action="store_true", help="start hidden in the tray")
     p.set_defaults(fn=cmd_tray)

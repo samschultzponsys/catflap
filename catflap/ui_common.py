@@ -78,7 +78,8 @@ def _arch_path(s: float) -> "QtGui.QPainterPath":
 
 
 def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
-                style: str = "site", phase: float = 0.0) -> "QtGui.QPixmap":
+                style: str = "site", phase: float = 0.0,
+                adguard: str | None = None) -> "QtGui.QPixmap":
     """The tray icon: the cat sitting in its tunnel, reaching up.
 
     Disconnected: grey outline. Failed: grey outline with a red dot.
@@ -89,6 +90,10 @@ def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
     * ``"site"``: the site's color; with several sites, a gradient across all of them
     * ``"cycle"``: fades from one site's color to the next (``phase`` 0..n moves it)
     * ``"blue"``: always the blue app icon
+
+    ``adguard`` adds a small shield in the top-left corner for AdGuard's state:
+    ``"on"`` green with a tick, ``"paused"`` amber with a pause mark, ``"off"``
+    white with a grey slash; anything else draws no shield.
     """
     pm = QtGui.QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -116,8 +121,64 @@ def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
         p.drawPath(_arch_path(s))
         if error:
             _badge(p, s, RED, "")
+    if adguard in ("on", "paused", "off"):
+        _shield(p, s, adguard)
     p.end()
     return pm
+
+
+AMBER = "#F59E0B"
+
+
+def shield_path(s: float, x: float = 0.0, y: float = 0.0) -> "QtGui.QPainterPath":
+    path = QtGui.QPainterPath()
+    pt = lambda a, b: QtCore.QPointF((a + x) * s, (b + y) * s)  # noqa: E731
+    path.moveTo(pt(13, 2))
+    path.lineTo(pt(24, 6))
+    path.lineTo(pt(24, 13))
+    path.cubicTo(pt(24, 20), pt(19.5, 24.5), pt(13, 27.5))
+    path.cubicTo(pt(6.5, 24.5), pt(2, 20), pt(2, 13))
+    path.lineTo(pt(2, 6))
+    path.closeSubpath()
+    return path
+
+
+def _shield(p: "QtGui.QPainter", s: float, state: str) -> None:
+    """AdGuard status shield, top-left corner (the VPN dot is bottom-right)."""
+    path = shield_path(s)
+    fill = {"on": GREEN, "paused": AMBER, "off": "#F8FAFC"}[state]
+    p.setPen(QtGui.QPen(QtGui.QColor("white" if state != "off" else GREY), 2.5 * s,
+                        Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(QtGui.QColor(fill))
+    p.drawPath(path)
+    mark = QtGui.QPen(QtGui.QColor("white" if state != "off" else GREY), 3 * s,
+                      Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(mark)
+    p.setBrush(Qt.NoBrush)
+    if state == "on":
+        tick = QtGui.QPainterPath()
+        tick.moveTo(8 * s, 14.5 * s)
+        tick.lineTo(11.8 * s, 18.5 * s)
+        tick.lineTo(18.5 * s, 10 * s)
+        p.drawPath(tick)
+    elif state == "paused":
+        p.drawLine(QtCore.QPointF(10 * s, 9.5 * s), QtCore.QPointF(10 * s, 19 * s))
+        p.drawLine(QtCore.QPointF(16 * s, 9.5 * s), QtCore.QPointF(16 * s, 19 * s))
+    else:
+        p.drawLine(QtCore.QPointF(7 * s, 21 * s), QtCore.QPointF(19 * s, 8 * s))
+
+
+def shield_icon(state: str, size: int = 32) -> "QtGui.QIcon":
+    """The shield alone, for menu items."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    if state in ("on", "paused", "off"):
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.translate(size * 3 / 64, size * 2 / 64)
+        _shield(p, size / 30.0, state)
+        p.end()
+    return QtGui.QIcon(pm)
 
 
 def _mix(a: "QtGui.QColor", b: "QtGui.QColor", t: float) -> "QtGui.QColor":
@@ -185,8 +246,8 @@ def app_icon() -> "QtGui.QIcon":
 
 
 def make_icon(colors: list[str], error: bool = False, size: int = 64,
-              style: str = "site", phase: float = 0.0) -> "QtGui.QIcon":
-    return QtGui.QIcon(make_pixmap(colors, error, size, style, phase))
+              style: str = "site", phase: float = 0.0, adguard: str | None = None) -> "QtGui.QIcon":
+    return QtGui.QIcon(make_pixmap(colors, error, size, style, phase, adguard))
 
 
 def dot_pixmap(color: str, filled: bool, size: int = 16) -> "QtGui.QPixmap":

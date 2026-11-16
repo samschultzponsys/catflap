@@ -3,6 +3,39 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 1.8
+
+- **AdGuard for Linux in the tray.** If AdGuard's command-line app (`adguard-cli`) is
+  installed, the tray menu gets an AdGuard section: an **AdGuard ad blocking** checkbox
+  (on/off), **Pause AdGuard** for 5 minutes, 30 minutes, 1 hour or until you resume
+  (CatFlap turns it back on when the time is up), **Resume AdGuard now**, and an
+  **AdGuard** submenu (filter lists, updates, browser extension, setup).
+- **AdGuard status on the tray icon:** a small shield in the top-left corner: green with
+  a tick while protecting, amber with a pause mark while paused, white with a slash when
+  off. It never covers the VPN dot (bottom-right). **Settings → AdGuard ad blocker → Show
+  AdGuard's status on the tray icon** turns it off. The tooltip says the same in words.
+- **Check HTTPS filtering…** (tray → AdGuard, or Settings → AdGuard ad blocker): finds
+  everything that has to trust AdGuard's certificate for HTTPS filtering to work: the
+  system certificates, each Firefox-family profile (including Flatpak browsers) and the
+  Chrome-family store. Anything that isn't right gets a **Fix** button: trust the
+  certificate system-wide (asks for your password), add it to a browser (needs
+  `certutil`), or exclude an app from HTTPS filtering.
+- **Exclude an app from HTTPS filtering…:** adds the app to AdGuard's `proxy.yaml`
+  (`bypass_https`, or `bypass` to skip filtering it entirely), keeps a backup and
+  restarts AdGuard. For apps that pin their certificates (banking, some games and chat
+  apps, developer tools).
+- **Gateways and AdGuard's HTTPS filtering:** when AdGuard (Linux or Windows) re-signs
+  the connection to your gateway, CatFlap now says exactly that and how to exclude it,
+  instead of *gateway TLS certificate changed*. Adding a gateway never pins AdGuard's
+  stand-in certificate by mistake.
+- **New command:** `catflap adguard [status|on|off|pause [MIN]|resume|https-check|exclude APP]`.
+- **Other software list:** AdGuard Ad Blocker (Windows) and AdGuard for Linux are listed
+  as *works alongside CatFlap*, with no uninstall box and no popup. AdGuard VPN is listed
+  as a full-tunnel VPN like the others.
+- Flatpak: controlling AdGuard needs one extra permission, which the Flatpak doesn't
+  have by default; CatFlap shows the one-line command (Settings → AdGuard ad blocker).
+- RPM: recommends `nss-tools` (for adding AdGuard's certificate to browsers).
+
 ## 1.7
 
 - Windows: the WireGuard app is always listed under other VPN software, even before

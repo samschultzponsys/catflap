@@ -466,3 +466,120 @@ def test_wireguard_app_row_offers_hiding_the_tray_icon(qapp):
     d.set_choice("wireguard-app", uninstall=True)        # uninstall unticks hide
     assert not d.hide_tray() and [f.key for f in d.uninstall()] == ["wireguard-app"]
     assert d.ok.text() == "Uninstall 1 and close"
+
+
+# ============================================================ AdGuard for Linux
+class FakeAdGuard:
+    """Stands in for catflap.adguard.AdGuard."""
+
+    def __init__(self, state="on"):
+        from catflap import adguard
+        self.state = state
+        self.calls = []
+        self.host = adguard.Host(flatpak=False)
+        self.fail_start = None
+
+    def status(self):
+        from catflap.adguard import CliStatus
+        return CliStatus(self.state, f"status: {self.state}")
+
+    def path(self, refresh=False):
+        return "/usr/local/bin/adguard-cli"
+
+    def start(self):
+        self.calls.append("start")
+        if self.fail_start:
+            raise self.fail_start
+        self.state = "on"
+
+    def stop(self):
+        self.calls.append("stop")
+        self.state = "off"
+
+
+def test_icon_adguard_shield(qapp):
+    plain = make_icon([]).pixmap(64, 64).toImage()
+    on = make_icon([], adguard="on").pixmap(64, 64).toImage().pixelColor(5, 12)
+    paused = make_icon([], adguard="paused").pixmap(64, 64).toImage().pixelColor(5, 12)
+    off = make_icon([], adguard="off").pixmap(64, 64).toImage().pixelColor(5, 12)
+    assert plain.pixelColor(5, 12).alpha() == 0                     # no shield without AdGuard
+    assert on.green() > 120 and on.red() < 100                      # green shield
+    assert paused.red() > 200 and paused.green() > 120 and paused.blue() < 80   # amber
+    assert off.red() > 200 and off.green() > 200 and off.blue() > 200          # white
+    assert make_icon([], adguard="missing").pixmap(64, 64).toImage() == plain
+    dot = make_icon(["#ff0000"], adguard="on").pixmap(64, 64).toImage().pixelColor(51, 51)
+    assert dot.green() > 150 and dot.red() < 100                    # VPN dot unchanged
+
+
+def _labels(menu):
+    return [a.text() for a in menu.actions()]
+
+
+linux_only = pytest.mark.skipif(__import__("sys").platform == "win32", reason="adguard-cli is Linux only")
+
+
+@linux_only
+def test_tray_adguard_menu_pause_and_auto_resume(qapp, manager, monkeypatch):
+    from catflap import adguard
+    ag = FakeAdGuard("on")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_state == "on")
+    labels = _labels(app.menu)
+    assert "AdGuard ad blocking: Protecting" in labels and "Pause AdGuard" in labels
+    assert "AdGuard: Protecting" in app.tray.toolTip()
+    pause_menu = next(a.menu() for a in app.menu.actions() if a.text() == "Pause AdGuard")
+    next(a for a in pause_menu.actions() if a.text() == "For 5 minutes").trigger()
+    wait_for(qapp, lambda: not app.ag_busy)
+    assert ag.calls == ["stop"] and app.ag_state == "paused"
+    assert adguard.PAUSE_KEY in manager.store.settings()
+    assert any(t.startswith("AdGuard ad blocking: Paused, 5 min left") for t in _labels(app.menu))
+    assert "Resume AdGuard now" in _labels(app.menu)
+
+    # Time's up: the next poll turns it back on.
+    app.settings[adguard.PAUSE_KEY] = 1.0
+    app.poll_adguard()
+    wait_for(qapp, lambda: ag.calls == ["stop", "start"] and not app.ag_busy)
+    assert app.ag_state == "on" and adguard.PAUSE_KEY not in app.settings
+
+
+@linux_only
+def test_tray_adguard_failed_auto_resume_gives_up(qapp, manager):
+    from catflap import adguard
+    ag = FakeAdGuard("off")
+    ag.fail_start = adguard.NeedsTerminal(["adguard-cli", "start"], "sudo: a terminal is required")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    app.settings[adguard.PAUSE_KEY] = 1.0
+    wait_for(qapp, lambda: not app._ag_polling)
+    app.poll_adguard()
+    wait_for(qapp, lambda: "start" in ag.calls and not app.ag_busy)
+    wait_for(qapp, lambda: app.ag_state == "off")
+    assert adguard.PAUSE_KEY not in app.settings                    # no retry loop
+    assert ag.calls == ["start"]
+
+
+@linux_only
+def test_tray_adguard_toggle_and_hide_shield(qapp, manager):
+    from catflap import adguard
+    ag = FakeAdGuard("off")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_state == "off")
+    toggle = next(a for a in app.menu.actions() if a.text().startswith("AdGuard ad blocking"))
+    assert toggle.isCheckable() and not toggle.isChecked()
+    toggle.trigger()
+    wait_for(qapp, lambda: app.ag_state == "on" and not app.ag_busy)
+    app.set_adguard_show(False)
+    assert manager.store.settings()[adguard.SHOW_KEY] is False
+    assert app._tray_icon().pixmap(64, 64).toImage().pixelColor(5, 12).alpha() == 0
+
+
+@linux_only
+def test_tray_without_adguard_has_no_section(qapp, manager):
+    ag = FakeAdGuard("missing")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: not app._ag_polling)
+    assert not any("AdGuard" in t for t in _labels(app.menu))
+    assert "AdGuard" not in app.tray.toolTip()
