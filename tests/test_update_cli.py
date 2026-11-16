@@ -87,6 +87,9 @@ def test_flatpak_update_downloads_bundle_and_explains(monkeypatch, tmp_path):
 
 def test_restart_command_runs_latest_version(monkeypatch):
     assert update.restart_command(InstallInfo("flatpak")) == ["flatpak-spawn", "--latest-version", "catflap-tray"]
+    # With a delay the new instance waits for the old one to release its tray icon.
+    assert update.restart_command(InstallInfo("flatpak"), delay=2) == [
+        "flatpak-spawn", "--latest-version", "sh", "-c", "sleep 2; exec catflap-tray"]
     monkeypatch.setattr(update.shutil, "which", lambda n: None)
     assert update.restart_command(InstallInfo("pip"))[-2:] == ["catflap", "tray"]
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/catflap-tray")

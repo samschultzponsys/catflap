@@ -225,17 +225,31 @@ def flatpak_commands(st: UpdateStatus, bundle: Path | None = None) -> list[str]:
     return cmds + [f"flatpak install --user -y {path}"]
 
 
-def restart_command(info: InstallInfo | None = None) -> list[str]:
-    """How to start a fresh catflap that runs the newly installed version."""
+RESTART_DELAY = 2          # seconds the new instance waits for the old one to be gone
+
+
+def restart_command(info: InstallInfo | None = None, delay: float = 0) -> list[str]:
+    """How to start a fresh catflap that runs the newly installed version.
+
+    ``delay`` makes the new one wait before starting, so the old one has quit and
+    released its tray icon. (Inside the Flatpak every instance is PID 2, so both
+    would claim the same tray-icon name and the new icon could fail to appear.)"""
     info = info or detect_install()
     if info.method == "flatpak":
         # The Flatpak portal starts the *latest installed* version of this app
         # in a new sandbox; no extra permissions needed.
+        if delay:
+            return ["flatpak-spawn", "--latest-version", "sh", "-c",
+                    f"sleep {delay:g}; exec catflap-tray"]
         return ["flatpak-spawn", "--latest-version", "catflap-tray"]
     if info.method == "windows":
         return [sys.executable, "tray"]
     exe = shutil.which("catflap-tray")
-    return [exe] if exe else [sys.executable, "-m", "catflap", "tray"]
+    cmd = [exe] if exe else [sys.executable, "-m", "catflap", "tray"]
+    if delay:
+        import shlex
+        return ["sh", "-c", f"sleep {delay:g}; exec " + " ".join(shlex.quote(c) for c in cmd)]
+    return cmd
 
 
 def installed_version(info: InstallInfo | None = None,
@@ -264,8 +278,9 @@ def installed_version(info: InstallInfo | None = None,
 
 
 def restart(info: InstallInfo | None = None) -> None:
-    """Start the new catflap; the caller then quits this one."""
-    subprocess.Popen(restart_command(info), start_new_session=True,
+    """Start the new catflap (a moment later, on Linux); the caller then quits this one."""
+    delay = 0 if sys.platform == "win32" else RESTART_DELAY
+    subprocess.Popen(restart_command(info, delay), start_new_session=True,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 

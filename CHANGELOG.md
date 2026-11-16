@@ -3,6 +3,28 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 1.9
+
+- **Flatpak: CatFlap asks for AdGuard permission as soon as it sees AdGuard.** The sandbox
+  can't see `adguard-cli` until it's allowed, so CatFlap now spots AdGuard from inside
+  the sandbox (its proxy answers on this computer, or it re-signs HTTPS) and immediately
+  shows the one command to run, with **Copy** and **I've run it: Restart CatFlap**. It
+  asks again at every start until it's allowed (or you tick *Don't ask again*), the tray
+  icon shows a red **!** shield, and the tray menu has **⚠ Let CatFlap control AdGuard…**.
+- **CatFlap restarts itself after an update.** It checks every minute whether a newer
+  CatFlap was installed (from the update window, a terminal, Discover or dnf) and
+  restarts into it. Restarting always ends the old copy, and the new one waits a moment
+  so its tray icon appears reliably (inside the Flatpak both copies otherwise claim the
+  same tray icon).
+- **Update AdGuard** works while AdGuard is running: AdGuard refuses to update while its
+  proxy runs, so CatFlap stops it, updates, and starts it again in the same terminal.
+- **HTTPS check:** recognizes AdGuard's default of filtering HTTPS only in browsers, and
+  says so instead of "CatFlap's own test connection wasn't filtered". Non-browser apps
+  with their own certificate store (Steam, Discord, Slack, Spotify, Thunderbird) are
+  shown as information, not problems, since AdGuard doesn't filter them by default.
+  "Add to this browser" on items that are already fine is now **Add anyway**.
+- The tray menu and Settings say **AdGuard Ad Blocking**.
+
 ## 1.8
 
 - **AdGuard for Linux in the tray.** If AdGuard's command-line app (`adguard-cli`) is

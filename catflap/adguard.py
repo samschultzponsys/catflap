@@ -407,10 +407,24 @@ class AdGuard:
         return "manual" if "manual" in v else "auto" if "auto" in v else ""
 
 
-def terminal_argv(host: Host, argv: list[str], title: str = "AdGuard") -> list[str] | None:
-    """A command that opens a terminal running ``argv`` and waits for Enter."""
+def shell_steps(steps: list[tuple[list[str], str]]) -> str:
+    """Shell text for several commands. Each step is (argv, how it joins the next one):
+    ``"&&"`` (only if it worked) or ``";"`` (always)."""
     import shlex
-    script = (f"printf '%s\\n\\n' {shlex.quote(title)}; " + " ".join(shlex.quote(a) for a in argv)
+    out = ""
+    for i, (argv, join) in enumerate(steps):
+        out += " ".join(shlex.quote(a) for a in argv)
+        if i < len(steps) - 1:
+            out += f" {join} "
+    return out
+
+
+def terminal_argv(host: Host, argv: list[str] | str, title: str = "AdGuard") -> list[str] | None:
+    """A command that opens a terminal running ``argv`` (or shell text from
+    :func:`shell_steps`) and waits for Enter."""
+    import shlex
+    cmd = argv if isinstance(argv, str) else " ".join(shlex.quote(a) for a in argv)
+    script = (f"printf '%s\\n\\n' {shlex.quote(title)}; " + cmd
               + "; echo; read -r -p 'Done. Press Enter to close this window.' _")
     for name, flag in TERMINALS:
         if host.which(name):
@@ -418,13 +432,45 @@ def terminal_argv(host: Host, argv: list[str], title: str = "AdGuard") -> list[s
     return None
 
 
-def open_terminal(host: Host, argv: list[str], title: str = "AdGuard") -> bool:
+def update_script(ag: "AdGuard", running: bool) -> str:
+    """``adguard-cli update`` refuses while the proxy runs: stop it, update, start it again."""
+    if not running:
+        return shell_steps([(ag.argv("update"), ";")])
+    return shell_steps([(ag.argv("stop"), "&&"), (ag.argv("update"), ";"), (ag.argv("start"), ";")])
+
+
+def open_terminal(host: Host, argv: list[str] | str, title: str = "AdGuard") -> bool:
     cmd = terminal_argv(host, argv, title)
     if not cmd:
         return False
     subprocess.Popen(host.argv(cmd), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,  # noqa: S603
                      stderr=subprocess.DEVNULL, start_new_session=True)
     return True
+
+
+# ============================================================ seen from inside the Flatpak
+def proxy_answers(port: int = 3129, timeout: float = 2.0,
+                  connect: Callable[..., Any] = socket.create_connection) -> bool:
+    """Is AdGuard's HTTP proxy listening on this computer? (Works inside the sandbox,
+    which shares the network.) AdGuard answers for its own local.adguard.org."""
+    try:
+        with connect(("127.0.0.1", port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(b"GET http://local.adguard.org/ HTTP/1.0\r\nHost: local.adguard.org\r\n\r\n")
+            data = s.recv(4096)
+    except OSError:
+        return False
+    return data.startswith(b"HTTP/")
+
+
+def detect_from_sandbox(probe_fn: Callable[..., Probe] | None = None,
+                        proxy_fn: Callable[[], bool] = proxy_answers) -> bool:
+    """AdGuard is running on this computer, as far as a sandboxed app can tell:
+    its proxy answers on the default port, or it re-signs our HTTPS connections."""
+    if proxy_fn():
+        return True
+    pr = (probe_fn or probe)("example.com", timeout=4)
+    return pr.intercepted
 
 
 # ============================================================ pause / resume
@@ -648,7 +694,11 @@ FLATPAK_NAMES = {
     "com.brave.Browser": "Brave (Flatpak)", "com.microsoft.Edge": "Microsoft Edge (Flatpak)",
     "com.vivaldi.Vivaldi": "Vivaldi (Flatpak)", "com.opera.Opera": "Opera (Flatpak)",
     "io.github.ungoogled_software.ungoogled_chromium": "Ungoogled Chromium (Flatpak)",
+    "com.valvesoftware.Steam": "Steam (Flatpak)", "com.discordapp.Discord": "Discord (Flatpak)",
+    "com.slack.Slack": "Slack (Flatpak)", "com.spotify.Client": "Spotify (Flatpak)",
 }
+NOT_BROWSERS = {"org.mozilla.Thunderbird", "com.valvesoftware.Steam", "com.discordapp.Discord",
+                "com.slack.Slack", "com.spotify.Client"}
 NSS_PATTERNS = (
     ("~/.mozilla/firefox/*/cert9.db", "Firefox"),
     ("~/.config/mozilla/firefox/*/cert9.db", "Firefox"),
@@ -675,6 +725,7 @@ class NssStore:
     name: str            # "Firefox (Flatpak) - default-release"
     flatpak: bool
     chromium: bool
+    browser: bool = True     # AdGuard filters browsers' HTTPS by default; other apps not
 
 
 def nss_stores(host: Host) -> list[NssStore]:
@@ -687,15 +738,18 @@ def nss_stores(host: Host) -> list[NssStore]:
             seen.add(d)
             chromium = d.endswith("/.pki/nssdb")
             fp = "/.var/app/" in d
+            browser = True
             if fp:
                 app = d.split("/.var/app/", 1)[1].split("/", 1)[0]
                 label = FLATPAK_NAMES.get(app, f"{app} (Flatpak)")
+                browser = app in FLATPAK_NAMES and app not in NOT_BROWSERS
             else:
                 label = name or "Browser"
+                browser = "thunderbird" not in d
             if not chromium:
                 prof = os.path.basename(d)
                 label += f" · profile {prof.split('.', 1)[-1] if '.' in prof else prof}"
-            out.append(NssStore(d, label, fp, chromium))
+            out.append(NssStore(d, label, fp, chromium, browser))
     return out
 
 
@@ -728,6 +782,15 @@ def store_has(host: Host, store: NssStore, ca) -> bool | None:
     # cert9.db is SQLite; the certificate's DER encoding is stored as-is.
     from cryptography.hazmat.primitives.serialization import Encoding
     return ca.public_bytes(Encoding.DER) in data
+
+
+_ALL_APPS_RULE = re.compile(r"-\s*name:\s*['\"]?\*['\"]?\s*\n\s*action:\s*['\"]?(bypass_https|bypass)\b")
+
+
+def browsers_only(proxy_yaml: str) -> bool:
+    """AdGuard's default ``apps`` list ends with ``name: '*'`` / ``action: bypass_https``:
+    only browsers (browsers.yaml) and apps listed before it get HTTPS filtering."""
+    return bool(_ALL_APPS_RULE.search(proxy_yaml))
 
 
 # ============================================================ the report
@@ -786,10 +849,17 @@ def https_report(ag: AdGuard, gateways: dict[str, dict] | None = None,
     pr = probe_fn("example.com")
     rep.filtering = pr.intercepted
     mode = ag.proxy_mode()
+    cfg = ag.config_location()
+    only_browsers = browsers_only((host.read(cfg) or b"").decode(errors="replace")) if cfg else False
     if pr.intercepted:
         rep.add("filtering", "HTTPS filtering", OK, "Active: AdGuard is filtering HTTPS connections.")
     elif not pr.reachable:
         rep.add("filtering", "HTTPS filtering", INFO, f"Couldn't reach the internet to check ({pr.error}).")
+    elif only_browsers:
+        rep.add("filtering", "HTTPS filtering", OK,
+                "On for browsers. AdGuard filters HTTPS only in browsers (its default), so other "
+                "apps, CatFlap included, aren't affected. Browsers must trust AdGuard's "
+                "certificate (below).")
     else:
         why = ("AdGuard is in manual proxy mode, so only apps set to use its proxy are filtered"
                if mode == "manual" else "HTTPS filtering is off, or this app is excluded from it")
@@ -841,10 +911,15 @@ def https_report(ag: AdGuard, gateways: dict[str, dict] | None = None,
         elif uses_system and sys_ok:
             rep.add("nss", s.name, OK, "Uses the system certificates, which trust AdGuard. If this "
                     "browser still shows certificate errors (Firefox from mozilla.org brings its own "
-                    "list), use Fix.", fix="nss" if certutil else "", fix_label="Add to this browser",
-                    target=s.path)
+                    "list), click Add anyway.", fix="nss" if certutil else "",
+                    fix_label="Add anyway", target=s.path)
+        elif not s.browser and (only_browsers or not pr.intercepted):
+            rep.add("nss", s.name, INFO, "Not a browser: AdGuard doesn't filter this app's HTTPS "
+                    "(it filters browsers only), so nothing breaks. Only needed if you turn on HTTPS "
+                    "filtering for this app.", fix="nss" if certutil else "",
+                    fix_label="Add anyway", target=s.path)
         else:
-            why = ("Flatpak browsers don't see the system certificates." if s.flatpak else
+            why = ("Flatpak apps don't see the system certificates." if s.flatpak else
                    "Fix the system certificates above first." if uses_system else
                    "This browser keeps its own certificate list.")
             rep.add("nss", s.name, BAD, f"Not trusted: sites show certificate errors. {why}"

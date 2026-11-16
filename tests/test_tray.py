@@ -531,14 +531,14 @@ def test_tray_adguard_menu_pause_and_auto_resume(qapp, manager, monkeypatch):
     app.timer.stop()
     wait_for(qapp, lambda: app.ag_state == "on")
     labels = _labels(app.menu)
-    assert "AdGuard ad blocking: Protecting" in labels and "Pause AdGuard" in labels
+    assert "AdGuard Ad Blocking: Protecting" in labels and "Pause AdGuard" in labels
     assert "AdGuard: Protecting" in app.tray.toolTip()
     pause_menu = next(a.menu() for a in app.menu.actions() if a.text() == "Pause AdGuard")
     next(a for a in pause_menu.actions() if a.text() == "For 5 minutes").trigger()
     wait_for(qapp, lambda: not app.ag_busy)
     assert ag.calls == ["stop"] and app.ag_state == "paused"
     assert adguard.PAUSE_KEY in manager.store.settings()
-    assert any(t.startswith("AdGuard ad blocking: Paused, 5 min left") for t in _labels(app.menu))
+    assert any(t.startswith("AdGuard Ad Blocking: Paused, 5 min left") for t in _labels(app.menu))
     assert "Resume AdGuard now" in _labels(app.menu)
 
     # Time's up: the next poll turns it back on.
@@ -571,7 +571,7 @@ def test_tray_adguard_toggle_and_hide_shield(qapp, manager):
     app = tray.TrayApp(qapp, manager, adguard_cli=ag)
     app.timer.stop()
     wait_for(qapp, lambda: app.ag_state == "off")
-    toggle = next(a for a in app.menu.actions() if a.text().startswith("AdGuard ad blocking"))
+    toggle = next(a for a in app.menu.actions() if a.text().startswith("AdGuard Ad Blocking"))
     assert toggle.isCheckable() and not toggle.isChecked()
     toggle.trigger()
     wait_for(qapp, lambda: app.ag_state == "on" and not app.ag_busy)
@@ -596,7 +596,7 @@ def test_tray_adguard_update_notice(qapp, manager, monkeypatch):
     ag = FakeAdGuard("on")
     ag.update = "1.5.1"
     opened = []
-    monkeypatch.setattr(adguard, "open_terminal", lambda host, argv, title="": opened.append(argv) or True)
+    monkeypatch.setattr(adguard, "open_terminal", lambda host, cmd, title="": opened.append(cmd) or True)
     shown = []
     app = tray.TrayApp(qapp, manager, adguard_cli=ag)
     app.timer.stop()
@@ -609,4 +609,82 @@ def test_tray_adguard_update_notice(qapp, manager, monkeypatch):
     wait_for(qapp, lambda: not app._ag_polling)
     assert len([m for m in shown if "1.5.1" in m]) <= 1              # told once per version
     next(a for a in app.menu.actions() if a.text() == "Update AdGuard to 1.5.1…").trigger()
-    assert opened == [["adguard-cli", "update"]]
+    assert opened == ["adguard-cli stop && adguard-cli update ; adguard-cli start"]
+
+
+@linux_only
+def test_tray_adguard_update_stops_and_restarts_adguard(qapp, manager, monkeypatch):
+    from catflap import adguard
+    ag = FakeAdGuard("on")
+    opened = []
+    monkeypatch.setattr(adguard, "open_terminal", lambda host, cmd, title="": opened.append(cmd) or True)
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_state == "on")
+    app.adguard_update()
+    assert opened == ["adguard-cli stop && adguard-cli update ; adguard-cli start"]
+
+
+@linux_only
+def test_flatpak_without_permission_asks_as_soon_as_adguard_is_seen(qapp, manager, monkeypatch):
+    from catflap import adguard, ui_adguard
+    ag = FakeAdGuard("no-access")
+    monkeypatch.setattr(adguard, "detect_from_sandbox", lambda: True)
+    shown = []
+
+    class FakeDialog:
+        def __init__(self, seen, declined, parent=None):
+            shown.append(seen)
+            self.declined, self.restart_now = False, True
+
+        def exec(self):
+            return 1
+    monkeypatch.setattr(ui_adguard, "FlatpakPermissionDialog", FakeDialog)
+    restarted = []
+    monkeypatch.setattr(tray.TrayApp, "restart_app", lambda self, info=None: restarted.append(1))
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: shown and restarted)
+    assert shown == [True] and app.adguard_needs_permission
+    assert "⚠ Let CatFlap control AdGuard…" in _labels(app.menu)
+    assert "needs permission" in app.tray.toolTip()
+    red = app._tray_icon().pixmap(64, 64).toImage().pixelColor(13, 12)
+    assert red.red() > 180 and red.green() < 100                     # red "!" shield
+    app._ag_detect_at = 0
+    app.poll_adguard()
+    wait_for(qapp, lambda: not app._ag_polling)
+    qapp.processEvents()
+    assert shown == [True]                                           # once per start
+
+
+@linux_only
+def test_flatpak_permission_declined_stays_quiet(qapp, manager, monkeypatch):
+    from catflap import adguard, ui_adguard
+    manager.store.settings()["adguard_flatpak_declined"] = True
+    monkeypatch.setattr(adguard, "detect_from_sandbox", lambda: True)
+    monkeypatch.setattr(ui_adguard, "FlatpakPermissionDialog",
+                        lambda *a, **k: pytest.fail("asked although declined"))
+    app = tray.TrayApp(qapp, manager, adguard_cli=FakeAdGuard("no-access"))
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_in_sandbox_seen)
+    assert "⚠ Let CatFlap control AdGuard…" in _labels(app.menu)    # still reachable
+    assert app._tray_icon().pixmap(64, 64).toImage().pixelColor(13, 12).alpha() == 0
+
+
+def test_restarts_when_a_newer_version_is_installed(qapp, manager, monkeypatch):
+    from catflap import update
+    monkeypatch.setattr(tray.TrayApp, "INSTALL_CHECK_MS", 10_000_000)
+    app = tray.TrayApp(qapp, manager, adguard_cli=FakeAdGuard("missing"))
+    app.timer.stop()
+    started, quits = [], []
+    monkeypatch.setattr(update, "restart", lambda info=None: started.append(info))
+    monkeypatch.setattr(app, "quit", lambda force=False: quits.append(force))
+    monkeypatch.setattr(update, "installed_version", lambda info=None: tray.__version__)
+    app.check_installed_version()
+    wait_for(qapp, lambda: not app._install_checking)
+    assert not started                                               # same version: nothing
+    monkeypatch.setattr(update, "installed_version", lambda info=None: "99.0")
+    monkeypatch.setattr(tray.QtCore.QTimer, "singleShot", lambda ms, fn: fn())
+    app.check_installed_version()
+    wait_for(qapp, lambda: started)
+    assert quits == [True] and manager.store.settings()["pending_update"] == "99.0"
