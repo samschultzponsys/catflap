@@ -17,10 +17,14 @@ class ConflictsDialog(_Dialog):
         self.setWindowTitle("Other VPN software")
         self.resize(700, 520)
         lay = QtWidgets.QVBoxLayout(self)
-        n = len(found)
+        n = sum(1 for f in found if not f.conflict.compatible)
+        ok = len(found) - n
+        head = (f"Found {n} other VPN program{'s' if n != 1 else ''} that can interfere with "
+                "CatFlap" if n else "No other VPN software that interferes with CatFlap")
+        if ok:
+            head += f" (and {ok} program{'s' if ok != 1 else ''} that work{'s' if ok == 1 else ''} alongside it)"
         intro = QtWidgets.QLabel(
-            f"<h3 style='margin:0'>Found {n} other VPN program{'s' if n != 1 else ''} that can "
-            "interfere with CatFlap</h3>"
+            f"<h3 style='margin:0'>{head}</h3>"
             + ("Tick <b>Uninstall</b> to remove one now (its own uninstaller runs; Windows may ask "
                "for permission). " if windows else
                "To remove one, use your software center or package manager. ")
@@ -39,7 +43,10 @@ class ConflictsDialog(_Dialog):
             box = QtWidgets.QFrame()
             box.setFrameShape(QtWidgets.QFrame.StyledPanel)
             bl = QtWidgets.QVBoxLayout(box)
-            title = QtWidgets.QLabel(f"<b>{f.label}</b>" + (f"<br><small>{f.detail}</small>" if f.detail else ""))
+            tag = (" <span style='color:#16A34A'>✔ works alongside CatFlap</span>"
+                   if f.conflict.compatible else "")
+            title = QtWidgets.QLabel(f"<b>{f.label}</b>{tag}"
+                                     + (f"<br><small>{f.detail}</small>" if f.detail else ""))
             title.setWordWrap(True)
             bl.addWidget(title)
             why = QtWidgets.QLabel(f.conflict.why)
@@ -47,7 +54,7 @@ class ConflictsDialog(_Dialog):
             bl.addWidget(why)
             cl = QtWidgets.QHBoxLayout()
             un = QtWidgets.QCheckBox("Uninstall")
-            un.setVisible(windows)
+            un.setVisible(windows and not f.conflict.compatible)
             un.setEnabled(f.can_uninstall)
             if windows and not f.can_uninstall:
                 un.setToolTip("No uninstaller registered; remove it from Settings > Apps.")
@@ -55,6 +62,7 @@ class ConflictsDialog(_Dialog):
             hide.setVisible(windows and f.conflict is conflicts.WIREGUARD_APP)
             quiet = QtWidgets.QCheckBox("Don't warn again")
             quiet.setChecked(ign.get(f.key) == f.version)
+            quiet.setVisible(not f.conflict.compatible)      # never warned about anyway
             un.toggled.connect(lambda on, h=hide: on and h.setChecked(False))
             hide.toggled.connect(lambda on, u=un: on and u.setChecked(False))
             for w in (un, hide, quiet):

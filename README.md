@@ -612,6 +612,8 @@ button. With no sites yet, it shows a big **Add your first site** button.
     - **Cycle through site colors:** fades from one site's color to the next.
     - **Blue:** always the blue app icon.
   - **Grey outline with a red dot:** the last connection attempt failed.
+  - **Shield in the top-left corner** (Linux, only with AdGuard for Linux installed):
+    AdGuard's state; see [AdGuard ad blocker (Linux)](#adguard-ad-blocker-linux).
 - **Clicking it:**
   - **Left-click** shows or hides the window.
   - **Right-click** lists your sites with their status. Click one to connect or
@@ -620,13 +622,102 @@ button. With no sites yet, it shows a big **Add your first site** button.
     **Quit**.
 - **Notifications** on connect, disconnect and failure, with the reason in plain words.
 
+### AdGuard ad blocker (Linux)
+
+CatFlap doesn't block ads itself. If you've installed **AdGuard for Linux** (the
+`adguard-cli` app from adguard.com, with your license activated), CatFlap gives it the
+tray controls the AdGuard Windows app has. Nothing appears if it isn't installed.
+
+**The shield on the tray icon** (top-left; the VPN dot stays bottom-right):
+
+| Shield | AdGuard |
+|---|---|
+| Green with a tick | Protecting |
+| Amber with a pause mark | Paused (by CatFlap's **Pause**) |
+| White with a grey slash | Turned off |
+| None | Not installed, or the shield is turned off in Settings |
+
+Hovering the icon says the same in words (*AdGuard: Paused, 8 min left*).
+**Settings → AdGuard ad blocker → Show AdGuard's status on the tray icon** hides the shield.
+
+**Tray menu:**
+
+- **AdGuard ad blocking: <state>**: tick to turn protection on, untick to turn it off
+  (`adguard-cli start` / `stop`).
+- **Pause AdGuard ▸** *For 5 minutes / 30 minutes / 1 hour / Until I resume*: stops
+  protection and turns it back on when the time is up (CatFlap must be running then).
+  **Resume AdGuard now** ends a pause early. If AdGuard is started some other way while
+  paused, the pause is forgotten.
+- **AdGuard ▸** *Check HTTPS filtering…*, *Exclude an app from HTTPS filtering…*,
+  *Show filter lists*, *Check for AdGuard and filter updates*, *Connect the AdGuard
+  browser extension* (`install-browser-integration`), *Run AdGuard setup in a
+  terminal…* (`configure`), and *Show status on the tray icon*.
+
+**If AdGuard asks for your password** (its automatic proxy mode uses `sudo`): CatFlap
+lets sudo ask in a window when a graphical password helper is installed
+(`ksshaskpass` on KDE: `sudo dnf install ksshaskpass`). Without one, CatFlap offers to
+open a terminal to run the command.
+
+**Flatpak:** AdGuard is outside CatFlap's sandbox. To let CatFlap control it, run this once
+and restart CatFlap (it lets CatFlap run commands outside the sandbox; the RPM doesn't
+need it):
+
+```bash
+flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.samschultzponsys.CatFlap
+```
+
+**Windows:** the AdGuard app has its own tray icon, so CatFlap only lists it under
+**Settings → Check for other VPN software…** as *works alongside CatFlap*.
+
+#### HTTPS filtering
+
+HTTPS filtering lets AdGuard block ads inside encrypted connections. It does that by
+re-signing every HTTPS connection with **its own certificate**. Anything that doesn't
+trust that certificate breaks: sites show certificate errors, and apps fail to connect.
+On Linux, several separate places decide what's trusted, which is why turning it on
+often breaks things:
+
+| Where | Used by | Notes |
+|---|---|---|
+| System certificates | curl, dnf, Python, CatFlap; on Fedora also Fedora's own Firefox and Chrome | Fixing needs your password |
+| Each Firefox-family profile | Firefox from Flathub or mozilla.org, LibreWolf, Floorp, Zen, Thunderbird | Each profile has its own list |
+| `~/.pki/nssdb` (and the same inside each Flatpak browser) | Chrome, Chromium, Brave, Edge, Vivaldi | Flatpak browsers never see the system list |
+| The app itself | Apps that pin certificates (banking, some games and chat apps, Electron/Node/Python tools with their own list) | Can't be fixed by trusting: exclude the app |
+
+**AdGuard ▸ Check HTTPS filtering…** checks all of these and lists each with ✔ / ✖, and a
+**Fix** button where CatFlap can fix it:
+
+- **Trust it (asks for your password):** copies AdGuard's certificate into the system
+  store (`/etc/pki/ca-trust/source/anchors` + `update-ca-trust` on Fedora,
+  `/usr/local/share/ca-certificates` + `update-ca-certificates` on Debian/Ubuntu).
+- **Add to this browser:** adds it to that browser profile with `certutil` (install
+  `nss-tools` on Fedora, `libnss3-tools` on Debian/Ubuntu). Restart the browser afterwards.
+- **Exclude CatFlap from HTTPS filtering / Exclude an app…:** adds the app to the `apps`
+  section of AdGuard's `proxy.yaml` with `action: bypass_https` (or `bypass` to skip
+  filtering it entirely), keeps `proxy.yaml.catflap-backup`, and restarts AdGuard. Use the
+  program's executable name; `*` matches anything. CatFlap runs as Python, so excluding
+  CatFlap means excluding `python3*`.
+- **Show certificate file:** CatFlap saves AdGuard's certificate to
+  `~/.cache/catflap/adguard-personal-ca.pem` for importing by hand.
+
+CatFlap gets AdGuard's certificate from `http://local.adguard.org/cert`, a page AdGuard
+itself answers while it's filtering, so turn protection on before checking.
+
+**Your gateways and HTTPS filtering.** CatFlap pins your gateway's certificate, so it
+refuses to talk to a gateway whose connection AdGuard re-signs, rather than send your API
+key through it. It tells you that's what's happening, and the HTTPS check offers to
+exclude CatFlap. On Windows, turn off HTTPS filtering for `catflap.exe` in AdGuard, or add
+the gateway's address to AdGuard's HTTPS exclusions.
+
 ### Window and settings
 
 - **Minimize / close:** minimizing hides the window to the tray. Closing it asks
   **Keep running in tray** or **Quit CatFlap**, with *Remember my choice*.
   **Settings → Ask again what the close button does** brings the question back.
   Connected sites stay connected either way.
-- **Settings:** *Start CatFlap when I log in* and *Check for updates automatically*.
+- **Settings:** *Start CatFlap when I log in*, *Check for updates automatically*, and
+  on Linux **AdGuard ad blocker ▸** (*Show AdGuard's status on the tray icon*, *Check
+  HTTPS filtering…*, *Exclude an app from HTTPS filtering…*).
 - **File:** *Export everything…* and *Import from another computer…* (locked with
   a passphrase).
 - **Help:** *Setup guide…*, *Check for updates…*, and *About* (version, and **how
@@ -667,6 +758,12 @@ Exit codes: `0` ok, `1` error, `2` usage, `3` checks failed.
 | `catflap import-bundle FILE [--overwrite] [--no-install]` | Import an export |
 | `catflap suggest-subnet N` | Suggest `10.250.N.0/28` and check it's free |
 | `catflap tray [--minimized]` | Start the tray app |
+| `catflap adguard [status]` | AdGuard for Linux: its state (*Protecting*, *Paused…*, *Turned off*) |
+| `catflap adguard on \| off` | Turn AdGuard protection on or off |
+| `catflap adguard pause [MINUTES\|forever]` | Pause protection; the tray app resumes it when the time is up |
+| `catflap adguard resume` | End a pause now |
+| `catflap adguard https-check` | Check everything HTTPS filtering needs (exit 3 if something needs fixing) |
+| `catflap adguard exclude APP [--all]` | Exclude an app from HTTPS filtering (`--all`: from all filtering) |
 
 Environment variables: `CATFLAP_API_KEY`, `CATFLAP_PASSWORD`, `CATFLAP_PASSPHRASE`
 (secrets for non-interactive use), `CATFLAP_CONFIG_DIR` (state location),
@@ -833,6 +930,8 @@ use your software center or package manager.
 | NordVPN, ExpressVPN, Surfshark, Proton VPN, Mullvad, PIA, Windscribe, CyberGhost, IPVanish, Cloudflare WARP | Full tunnel takes all traffic and DNS; kill switch / "block LAN" can block CatFlap | Disconnect it, or turn on split tunneling / allow LAN |
 | Cisco Secure Client/AnyConnect, GlobalProtect, FortiClient, Zscaler, Ivanti/Pulse, Check Point | Work VPNs enforce their own routes and DNS and may block other VPNs | Use CatFlap while it's disconnected |
 | OpenVPN | A profile can route the same networks (or everything) | CatFlap warns about overlaps when you connect |
+| AdGuard VPN | Full tunnel, like the VPNs above | Disconnect it, or use its exclusions for your sites' networks |
+| AdGuard Ad Blocker (Windows), AdGuard for Linux | Nothing: listed as *works alongside CatFlap*, never warned about. Only its HTTPS filtering can get in the way of a gateway | See [HTTPS filtering](#https-filtering) |
 
 Whatever is installed, CatFlap's pre-connect check still catches the actual clash (two
 tunnels or a local network routing the same addresses) and tells you which one.
@@ -845,6 +944,8 @@ tunnels or a local network routing the same addresses) and tells you which one.
 | *Polkit denied the change* | Run as your desktop user in an active session, not with sudo or SSH |
 | *the UniFi classic API refused the API key* | Add a local admin with `--username`, or use `catflap import` |
 | *gateway TLS certificate changed* | The console's certificate changed; re-pin with `catflap gateway add … --tofu` |
+| *AdGuard's HTTPS filtering is intercepting the connection to …* | Exclude CatFlap from AdGuard's HTTPS filtering (Linux: tray → AdGuard → Check HTTPS filtering…, or `catflap adguard exclude 'python3*'`; Windows: in AdGuard, turn off HTTPS filtering for `catflap.exe`) |
+| Sites or apps show certificate errors with AdGuard's HTTPS filtering on | Tray → AdGuard → **Check HTTPS filtering…** and use the Fix buttons; see [HTTPS filtering](#https-filtering) |
 | The taskbar or app menu still shows an old CatFlap icon | Fixed from 0.8: the launcher's icon name changes whenever the artwork does, so KDE's icon cache can't reuse an old one. For older versions: `rm -f ~/.cache/icon-cache.kcache`, then log out and back in |
 | *NetworkManager did not keep the safe settings* | An NM plugin or policy overrode them; the connection was removed for safety. Please file a bug |
 

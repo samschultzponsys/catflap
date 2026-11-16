@@ -14,6 +14,9 @@ Windows uses the notification area.
   a failure.
 * Notifications, start-at-login, daily update check with install-aware
   update instructions.
+* Linux with AdGuard for Linux (adguard-cli) installed: an AdGuard section in
+  the tray menu (on/off, pause, HTTPS filtering check) and a shield in the
+  icon's top-left corner (green on, amber paused, white off).
 
 All real work happens in :class:`catflap.core.Manager` on worker threads.
 """
@@ -24,11 +27,11 @@ import os
 import sys
 from typing import Any
 
-from . import autostart, checks, update
+from . import adguard, autostart, checks, update
 from .core import Manager
 from .drivers import DRIVERS
 from .model import Profile
-from .ui_common import (GREY, INFO, ColorDialog, app_icon, offer_wireguard_install, short_status, QtCore, QtGui, QtWidgets, dot_icon, friendly_error, make_icon, require_qt, run_bg, run_blocking)
+from .ui_common import (GREY, INFO, ColorDialog, app_icon, offer_wireguard_install, short_status, QtCore, QtGui, QtWidgets, dot_icon, friendly_error, make_icon, require_qt, run_bg, run_blocking, shield_icon)
 from .version import __version__
 
 __all__ = ["MainWindow", "TrayApp", "make_icon", "main"]
@@ -115,6 +118,16 @@ class MainWindow(QtWidgets.QMainWindow if QtWidgets else object):
                      lambda: self.app.set_setting("close_behavior", "ask"))
         sm.addAction("Check for other VPN software…",
                      lambda: self.app.check_conflicting_apps(manual=True))
+        if sys.platform != "win32":
+            am = sm.addMenu("AdGuard ad blocker")
+            self.a_adguard_show = am.addAction("Show AdGuard's status on the tray icon")
+            self.a_adguard_show.setCheckable(True)
+            self.a_adguard_show.setChecked(self.app.settings.get(adguard.SHOW_KEY, True))
+            self.a_adguard_show.toggled.connect(self.app.set_adguard_show)
+            am.addAction("Check HTTPS filtering…", self.app.adguard_https_check)
+            am.addAction("Exclude an app from HTTPS filtering…", self.app.adguard_exclude)
+            if adguard.in_flatpak():
+                am.addAction("Let CatFlap control AdGuard (Flatpak)…", self.app.adguard_flatpak_help)
         tm = sm.addMenu("Tray icon when connected")
         tgrp = QtGui.QActionGroup(self)
         current = self.app.settings.get("tray_style", "site")
@@ -370,10 +383,16 @@ class TrayApp(QtCore.QObject if QtCore else object):
     CYCLE_MS = 100          # tray color cycling: 100 ms steps,
     CYCLE_STEP = 0.04       # 2.5 s per site color
 
-    def __init__(self, qapp: "QtWidgets.QApplication", manager: Manager | None = None):
+    def __init__(self, qapp: "QtWidgets.QApplication", manager: Manager | None = None,
+                 adguard_cli: "adguard.AdGuard | None" = None):
         super().__init__()
         self.qapp = qapp
         self.m = manager or Manager()
+        self.ag = adguard_cli or adguard.AdGuard()
+        self.ag_state = adguard.MISSING
+        self.ag_text = ""
+        self.ag_busy = False
+        self._ag_polling = False
         self.settings = self.m.store.settings()
         self.quitting = False
         self.paused = 0
@@ -421,6 +440,7 @@ class TrayApp(QtCore.QObject if QtCore else object):
     def poll(self) -> None:
         if self.paused:
             return
+        self.poll_adguard()
         m = self.m
 
         def work():
@@ -446,7 +466,9 @@ class TrayApp(QtCore.QObject if QtCore else object):
         colors = [self.profiles[n].color or "#22C55E" for n in sorted(active)]
         failed = any(not e.startswith(INFO) for e in self.errors.values())
         style = self.settings.get("tray_style", "site")
-        return make_icon(colors, error=failed and not active, style=style, phase=self._phase)
+        shield = self.ag_state if self.settings.get(adguard.SHOW_KEY, True) else None
+        return make_icon(colors, error=failed and not active, style=style, phase=self._phase,
+                         adguard=shield)
 
     def _cycle_tick(self) -> None:
         """Fade the tray icon through the connected sites' colors (style "cycle")."""
@@ -475,8 +497,10 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self.tray.setIcon(self._tray_icon())
         self._update_cycle_timer()
         names = [self.profiles[n].display for n in sorted(active)]
-        self.tray.setToolTip("CatFlap: " + (", ".join(names) + " connected" if names
-                                             else "not connected"))
+        tip = "CatFlap: " + (", ".join(names) + " connected" if names else "not connected")
+        if self.adguard_shown:
+            tip += "\nAdGuard: " + adguard.describe(self.ag_state, self.settings)
+        self.tray.setToolTip(tip)
         self._build_menu()
         if self.window.isVisible():
             self.window.refresh()
@@ -501,6 +525,9 @@ class TrayApp(QtCore.QObject if QtCore else object):
                 a.triggered.connect(lambda _=False, n=p.name: self.toggle(n))
         if groups:
             m.addSeparator()
+        if self.adguard_shown:
+            self._build_adguard_menu(m)
+            m.addSeparator()
         m.addAction("Add a site…", self.add_site)
         m.addAction("Open CatFlap", self.show_window)
         if self.update_status and self.update_status.available:
@@ -508,6 +535,215 @@ class TrayApp(QtCore.QObject if QtCore else object):
                         lambda: self.check_updates(interactive=True))
         m.addSeparator()
         m.addAction("Quit", self.quit)
+
+    # -- AdGuard for Linux
+    @property
+    def adguard_shown(self) -> bool:
+        """AdGuard is installed and CatFlap can reach it."""
+        return self.ag_state not in (adguard.MISSING, adguard.NO_ACCESS)
+
+    def poll_adguard(self) -> None:
+        if self._ag_polling or self.ag_busy or sys.platform == "win32":
+            return
+        self._ag_polling = True
+        run_bg(self.ag.status, self._adguard_polled)
+
+    def _adguard_polled(self, st, err) -> None:
+        self._ag_polling = False
+        if err or st is None:
+            return
+        self.ag_text = st.text
+        state = adguard.effective_state(st.state, self.settings)
+        if state == adguard.PAUSED and adguard.pause_due(self.settings):
+            self.adguard_do("resume", notify="AdGuard protection is back on.")
+        if state != self.ag_state:
+            self.ag_state = state
+            self._render()
+
+    def set_adguard_show(self, on: bool) -> None:
+        self.set_setting(adguard.SHOW_KEY, bool(on))
+        self._render()
+
+    def _build_adguard_menu(self, m) -> None:
+        st = self.ag_state
+        label = "working…" if self.ag_busy else adguard.describe(st, self.settings)
+        a = m.addAction(shield_icon(st), f"AdGuard ad blocking: {label}")
+        a.setCheckable(True)
+        a.setChecked(st == adguard.ON)
+        a.setEnabled(not self.ag_busy)
+        if self.ag_text:
+            a.setToolTip(self.ag_text)
+        a.triggered.connect(lambda on: self.adguard_do("on" if on else "off"))
+        if st == adguard.ON:
+            pm = m.addMenu("Pause AdGuard")
+            pm.setEnabled(not self.ag_busy)
+            for mins, text in ((5, "For 5 minutes"), (30, "For 30 minutes"), (60, "For 1 hour"),
+                               (None, "Until I resume")):
+                pm.addAction(text, lambda mi=mins: self.adguard_do("pause", minutes=mi))
+        elif st == adguard.PAUSED:
+            r = m.addAction("Resume AdGuard now", lambda: self.adguard_do("resume"))
+            r.setEnabled(not self.ag_busy)
+        more = m.addMenu("AdGuard")
+        more.addAction("Check HTTPS filtering…", self.adguard_https_check)
+        more.addAction("Exclude an app from HTTPS filtering…", self.adguard_exclude)
+        more.addSeparator()
+        more.addAction("Show filter lists", lambda: self.adguard_output("Filter lists", self.ag.filters_list))
+        more.addAction("Check for AdGuard and filter updates",
+                       lambda: self.adguard_output("AdGuard updates", self.ag.check_update))
+        more.addAction("Connect the AdGuard browser extension",
+                       lambda: self.adguard_output("Browser extension", self.ag.install_browser_integration))
+        more.addAction("Run AdGuard setup in a terminal…",
+                       lambda: self._adguard_terminal([self.ag.path() or adguard.CLI, "configure"]))
+        more.addSeparator()
+        show = more.addAction("Show status on the tray icon")
+        show.setCheckable(True)
+        show.setChecked(self.settings.get(adguard.SHOW_KEY, True))
+        show.toggled.connect(self.set_adguard_show)
+
+    def adguard_do(self, what: str, minutes: int | None = None, notify: str = "") -> None:
+        """Turn AdGuard on/off, pause or resume it, in the background."""
+        if self.ag_busy:
+            return
+        ag = self.ag
+        # Worker threads get a copy; the pause is recorded on the UI thread when it worked.
+        settings = {k: v for k, v in self.settings.items() if k == adguard.PAUSE_KEY}
+
+        def work():
+            if what == "on":
+                adguard.resume(ag, settings)
+            elif what == "off":
+                adguard.turn_off(ag, settings)
+            elif what == "pause":
+                adguard.pause(ag, settings, None if minutes is None else minutes * 60)
+            elif what == "resume":
+                adguard.resume(ag, settings)
+            return ag.status()
+
+        def done(st, err):
+            self.ag_busy = False
+            if err and notify:
+                # The automatic end of a pause failed: don't retry (and ask) every 5 seconds.
+                self.settings.pop(adguard.PAUSE_KEY, None)
+                self.m.store.save()
+                self.tray.showMessage("AdGuard", "Couldn't turn AdGuard back on after the pause: "
+                                      + friendly_error(err) + " Use the tray menu to turn it on.",
+                                      QtWidgets.QSystemTrayIcon.Warning)
+            elif isinstance(err, adguard.NeedsTerminal):
+                self._adguard_needs_terminal(err)
+            elif err:
+                self.tray.showMessage("AdGuard", friendly_error(err), QtWidgets.QSystemTrayIcon.Warning)
+            else:
+                if adguard.PAUSE_KEY in settings:
+                    self.settings[adguard.PAUSE_KEY] = settings[adguard.PAUSE_KEY]
+                else:
+                    self.settings.pop(adguard.PAUSE_KEY, None)
+                msg = notify or {
+                    "on": "AdGuard protection is on.", "off": "AdGuard protection is off.",
+                    "resume": "AdGuard protection is back on.",
+                    "pause": ("AdGuard is paused until you resume it." if minutes is None else
+                              f"AdGuard is paused for {minutes} minutes."),
+                }[what]
+                self.tray.showMessage("AdGuard", msg, QtWidgets.QSystemTrayIcon.Information, 3000)
+            self.m.store.save()
+            if st is not None:
+                self.ag_text = st.text
+                self.ag_state = adguard.effective_state(st.state, self.settings)
+            self._render()
+            if err:
+                self.poll_adguard()             # show what state it was left in
+
+        self.ag_busy = True
+        self._render()
+        run_bg(work, done)
+
+    def _adguard_needs_terminal(self, err: "adguard.NeedsTerminal") -> None:
+        box = QtWidgets.QMessageBox(self.window)
+        box.setWindowTitle("AdGuard")
+        box.setText("AdGuard needs your password for this, and asks for it in a terminal.")
+        box.setInformativeText("Open a terminal to run it? Tip: installing ksshaskpass (KDE) "
+                               "lets it ask in a window instead.")
+        go = box.addButton("Open a terminal", QtWidgets.QMessageBox.AcceptRole)
+        box.addButton(QtWidgets.QMessageBox.Cancel)
+        self.run_dialog(box)
+        if box.clickedButton() is go:
+            self._adguard_terminal(err.argv)
+
+    def _adguard_terminal(self, argv: list[str]) -> None:
+        if not adguard.open_terminal(self.ag.host, argv):
+            QtWidgets.QMessageBox.information(self.window, "AdGuard", "No terminal app found. Run "
+                                              "this in a terminal:\n\n" + " ".join(argv))
+
+    def adguard_output(self, title: str, fn) -> None:
+        from .ui_adguard import TextDialog
+        try:
+            text = run_blocking(self.window, f"{title}…", fn)
+        except adguard.NeedsTerminal as e:
+            self._adguard_needs_terminal(e)
+            return
+        except Exception as e:  # noqa: BLE001
+            QtWidgets.QMessageBox.warning(self.window, "AdGuard", friendly_error(e))
+            return
+        self.run_dialog(TextDialog(f"AdGuard: {title}", text, self.window))
+
+    def _adguard_ready(self) -> bool:
+        if self.ag.host.flatpak and not self.ag.host.has_access():
+            self.adguard_flatpak_help()
+            return False
+        if not self.ag.path(refresh=True):
+            QtWidgets.QMessageBox.information(
+                self.window, "AdGuard", "AdGuard for Linux (adguard-cli) isn't installed. Get it "
+                "from adguard.com, then CatFlap shows it in the tray menu.")
+            return False
+        return True
+
+    def adguard_https_check(self) -> None:
+        from .ui_adguard import HttpsCheckDialog
+        if not self._adguard_ready():
+            return
+        gateways = self.m.store.gateways()
+        while True:
+            try:
+                rep = run_blocking(self.window, "Checking HTTPS filtering…",
+                                   lambda: adguard.https_report(self.ag, gateways))
+            except Exception as e:  # noqa: BLE001
+                QtWidgets.QMessageBox.warning(self.window, "AdGuard", friendly_error(e))
+                return
+            dlg = HttpsCheckDialog(self.ag, rep, self.window)
+            self.run_dialog(dlg)
+            if not dlg.rerun:
+                return
+
+    def adguard_exclude(self) -> None:
+        from .ui_adguard import ExcludeDialog
+        if not self._adguard_ready():
+            return
+        dlg = ExcludeDialog(self.window)
+        if not self.run_dialog(dlg):
+            return
+        app = dlg.app.currentText().strip()
+        if not app:
+            return
+        try:
+            msg = run_blocking(self.window, f"Excluding {app}…",
+                               lambda: adguard.exclude_app(self.ag, app, dlg.action))
+        except Exception as e:  # noqa: BLE001
+            QtWidgets.QMessageBox.warning(self.window, "AdGuard", friendly_error(e))
+            return
+        QtWidgets.QMessageBox.information(self.window, "AdGuard", msg)
+
+    def adguard_flatpak_help(self) -> None:
+        box = QtWidgets.QMessageBox(self.window)
+        box.setWindowTitle("AdGuard and the CatFlap Flatpak")
+        box.setText("CatFlap's Flatpak can't run AdGuard (it's outside the sandbox) until you "
+                    "allow it. Run this once in a terminal, then restart CatFlap:")
+        box.setInformativeText(adguard.FLATPAK_OVERRIDE + "\n\nThis lets CatFlap run commands "
+                               "on your computer outside the sandbox. If you'd rather not, install "
+                               "the CatFlap RPM instead.")
+        copy = box.addButton("Copy command", QtWidgets.QMessageBox.ActionRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        self.run_dialog(box)
+        if box.clickedButton() is copy:
+            QtWidgets.QApplication.clipboard().setText(adguard.FLATPAK_OVERRIDE)
 
     # -- actions
     def _activated(self, reason) -> None:

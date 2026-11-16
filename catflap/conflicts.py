@@ -34,6 +34,7 @@ class Conflict:
     programs: tuple[str, ...] = ()     # Windows Apps-list name prefixes (lowercase)
     interfaces: tuple[str, ...] = ()   # Linux interface name patterns
     exact: bool = False                # programs must match the whole name
+    compatible: bool = False           # works alongside CatFlap: listed for information only
 
 
 @dataclass
@@ -69,9 +70,21 @@ WIREGUARD_APP = Conflict("wireguard-app", "WireGuard (app)",
                          "connected. \"Hide tray icon\" keeps the app but stops it starting with "
                          "Windows.", ("wireguard",), exact=True)
 
+ADGUARD_WHY = ("Works alongside CatFlap. If its HTTPS filtering is on and adding or connecting "
+               "a site fails with a certificate message, turn off HTTPS filtering for CatFlap "
+               "(catflap.exe) in AdGuard, or add your gateway's address to its HTTPS exclusions.")
+ADGUARD = Conflict("adguard", "AdGuard Ad Blocker", ADGUARD_WHY, ("adguard",), exact=True,
+                   compatible=True)
+ADGUARD_CLI = Conflict("adguard-cli", "AdGuard for Linux (adguard-cli)",
+                       "Works alongside CatFlap, and CatFlap can control it: see the AdGuard "
+                       "items in the tray menu (on/off, pause, HTTPS filtering check). Its "
+                       "status shows as a small shield on CatFlap's tray icon.", compatible=True)
+
 KNOWN: tuple[Conflict, ...] = (
     WIFIMAN,
     WIREGUARD_APP,
+    ADGUARD,
+    Conflict("adguard-vpn", "AdGuard VPN", FULL_TUNNEL, ("adguard vpn", "adguardvpn")),
     Conflict("tailscale", "Tailscale", MESH, ("tailscale",), ("tailscale*",)),
     Conflict("zerotier", "ZeroTier", MESH, ("zerotier",), ("zt*",)),
     Conflict("netbird", "NetBird", MESH, ("netbird",), ("wt0", "netbird*")),
@@ -143,8 +156,16 @@ def detect(backend, platform: str, programs=None) -> list[Found]:
     try:
         devs = sorted({a.dev for a in backend.local_network().addresses if a.dev})
     except Exception:  # noqa: BLE001 - best effort
-        return []
-    return match_interfaces(devs)
+        devs = []
+    found = match_interfaces(devs)
+    try:
+        from .adguard import AdGuard
+        exe = AdGuard().path()
+    except Exception:  # noqa: BLE001 - best effort
+        exe = None
+    if exe:
+        found.append(Found(ADGUARD_CLI, ADGUARD_CLI.name, detail=f"installed at {exe}"))
+    return found
 
 
 # -- "don't warn again", remembered per software and version
@@ -168,6 +189,8 @@ def to_warn(found: list[Found], settings: dict) -> list[Found]:
     ign = ignored(settings)
     out = []
     for f in found:
+        if f.conflict.compatible:           # nothing to warn about
+            continue
         if f.key in ign and ign[f.key] == "*":
             ign[f.key] = f.version          # adopt the version silenced before versions were kept
         if f.key in ign and ign[f.key] == f.version:
