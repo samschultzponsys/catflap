@@ -140,7 +140,17 @@ def test_remove_with_revoke(manager, backend):
 def test_export_import_roundtrip(manager, tmp_path, monkeypatch):
     manager.provision("home-gw", "home", ["LAN"], device="d", color="#123456")
     text = manager.export("correct horse")
-    assert "KEY" not in text and "home.example.net" not in text   # encrypted
+    # Encrypted: no secrets or hostnames in clear text. The base64 ciphertext fields can
+    # contain any short string by chance, so scan only the envelope's plaintext fields;
+    # the private key is long enough to check against the whole text.
+    doc = json.loads(text)
+    assert doc["encrypted"] is True and "payload" not in doc
+    clear = json.dumps({k: v for k, v in doc.items() if k not in ("data", "nonce", "kdf")})
+    clear += json.dumps({k: v for k, v in doc["kdf"].items() if k != "salt"})
+    priv = manager.secrets.get(profile_key("home", "private_key"))
+    assert priv and priv not in text
+    for secret in ("KEY", "home.example.net", priv):
+        assert secret not in clear
     with pytest.raises(BundleError, match="passphrase"):
         Manager(Store(tmp_path / "x"), SecretStore("file", tmp_path / "x"), FakeBackend()).import_bundle(text, "wrong pass")
 
