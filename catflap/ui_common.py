@@ -308,9 +308,79 @@ def run_bg(fn: Callable[[], Any], cb: Callable[[Any, Any], None]) -> None:
     QtCore.QThreadPool.globalInstance().start(job)
 
 
+if QtCore is not None:
+    _INPUT_EVENTS = {QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                     QtCore.QEvent.MouseButtonDblClick, QtCore.QEvent.KeyPress,
+                     QtCore.QEvent.KeyRelease, QtCore.QEvent.Shortcut,
+                     QtCore.QEvent.ShortcutOverride, QtCore.QEvent.Wheel}
+
+    class _InputBlocker(QtCore.QObject):
+        """Swallows clicks and keys aimed at one window while it is busy, so a second
+        click on Next (or Enter) can't start the same action again."""
+
+        def __init__(self, window):
+            super().__init__()
+            self.window = window
+
+        def eventFilter(self, obj, ev) -> bool:  # noqa: N802 (Qt API)
+            if ev.type() in _INPUT_EVENTS and isinstance(obj, QtWidgets.QWidget):
+                return obj.window() is self.window
+            return False
+
+_BUSY_WINDOWS: dict = {}     # window -> how many run_blocking calls are running for it
+
+_WIZARD_BUTTONS = ("BackButton", "NextButton", "CommitButton", "FinishButton", "CancelButton")
+
+
+def _busy(window, on: bool, saved: dict | None = None) -> dict:
+    """Grey out a wizard's buttons while it's busy (and restore them after)."""
+    saved = saved if saved is not None else {}
+    if not isinstance(window, QtWidgets.QWizard):
+        return saved
+    for which in _WIZARD_BUTTONS:
+        btn = window.button(getattr(QtWidgets.QWizard, which))
+        if btn is None:
+            continue
+        if on:
+            saved[which] = btn.isEnabled()
+            btn.setEnabled(False)
+        elif which in saved:
+            btn.setEnabled(saved[which])
+    return saved
+
+
+def is_busy(widget) -> bool:
+    """True while ``run_blocking`` is working for the window ``widget`` is in."""
+    return widget is not None and widget.window() in _BUSY_WINDOWS
+
+
 def run_blocking(parent, text: str, fn: Callable[[], Any]) -> Any:
     """Run ``fn`` in the background behind a "please wait" dialog; return its
-    result or raise its exception. The UI keeps repainting meanwhile."""
+    result or raise its exception. The UI keeps repainting meanwhile, but the
+    window can't be clicked or typed into until ``fn`` finishes (its wizard
+    buttons are greyed out), so an action can't be started twice."""
+    window = parent.window() if parent is not None else None
+    blocker = None
+    saved: dict = {}
+    if window is not None:
+        _BUSY_WINDOWS[window] = _BUSY_WINDOWS.get(window, 0) + 1
+        blocker = _InputBlocker(window)
+        QtWidgets.QApplication.instance().installEventFilter(blocker)
+        saved = _busy(window, True)
+    try:
+        return _run_blocking(parent, text, fn)
+    finally:
+        if window is not None:
+            QtWidgets.QApplication.instance().removeEventFilter(blocker)
+            _busy(window, False, saved)
+            left = _BUSY_WINDOWS.get(window, 1) - 1
+            if left > 0:
+                _BUSY_WINDOWS[window] = left
+            else:
+                _BUSY_WINDOWS.pop(window, None)
+
+
+def _run_blocking(parent, text: str, fn: Callable[[], Any]) -> Any:
     dlg = QtWidgets.QProgressDialog(text, None, 0, 0, parent)
     dlg.setWindowTitle("CatFlap")
     dlg.setWindowModality(Qt.WindowModal)

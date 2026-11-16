@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 
-__version__ = "2.0"
+__version__ = "2.1"
 
 _VERSION_RE = re.compile(r"^v?(\d+)\.(\d)$")
 

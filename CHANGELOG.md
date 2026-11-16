@@ -3,6 +3,27 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.1
+
+- **Next can't be clicked twice.** While a wizard step is working (creating the site,
+  signing in, looking up consoles), its buttons are greyed out and clicks and keys are
+  ignored. A quick second click on Next used to start the same step again: it created the
+  site, then showed an error from the second attempt.
+- **Routers behind another router (double NAT).** For example a UDM Pro plugged in behind a
+  UCG Fiber. When the site's address is a private one (10.x, 192.168.x, 172.16–31.x),
+  CatFlap now says so and what to do, everywhere it matters: the wizard asks for the front
+  router's public IP or DDNS name (when UniFi reports a private WAN address, and when a
+  WireGuard file points at one), the pre-connect check warns, and a failed connection
+  says "forward UDP port 51821 to 10.0.1.30" with the site's real port and address
+  instead of a generic list of causes (which also always said 51820).
+- **UniFi server instructions match today's UniFi.** The "create a VPN server" steps follow
+  the current *New VPN Server* window: keep the detected Server Address and port, what the
+  *behind NAT* warning means, *Alternate Address for Clients*, and the VPN range under
+  **Advanced → Manual**. CatFlap suggests a VPN range (10.250.N.1/24) that none of your
+  other sites, their networks or this site's networks use, and lists the ones in use. It
+  also warns when a server shares its VPN range (often UniFi's automatic 192.168.3.x) with
+  another site.
+
 ## 2.0
 
 - **Update checks you can't miss.** Every time CatFlap starts it asks GitHub for the newest

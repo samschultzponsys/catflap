@@ -28,9 +28,20 @@ from .drivers import get_driver_class
 from .drivers.base import GatewayConfig
 from .http import fetch_fingerprint
 from .ui_common import (app_icon, ColorPicker, QtWidgets, offer_wireguard_install, Qt, friendly_error,
-                        run_bg, run_blocking)
+                        is_busy, run_bg, run_blocking)
 
-_Wizard = QtWidgets.QWizard if QtWidgets else object
+_QWizard = QtWidgets.QWizard if QtWidgets else object
+
+
+class _Wizard(_QWizard):
+    """A QWizard that ignores Next/Finish while a step is still working, so one click
+    (or a quick second one) creates a site or gateway once, not twice."""
+
+    def validateCurrentPage(self) -> bool:  # noqa: N802 (Qt API)
+        if is_busy(self):
+            return False
+        return super().validateCurrentPage()
+
 _Page = QtWidgets.QWizardPage if QtWidgets else object
 
 
@@ -82,21 +93,91 @@ Integrations</b>, click <b>Create API Key</b>, copy it, and paste it below with 
 address on that network.</p>
 """
 
-UNIFI_SERVER_HELP = """
+def _vpn_subnets_in_use(m: Manager, networks=()) -> tuple[str, list[tuple[str, str]]]:
+    """A free VPN subnet for a new site's server, and what's already taken.
+
+    Looks at the sites already in CatFlap (their VPN address ranges and the networks they
+    reach), the networks at the site being added, and the network this computer is on.
+    Returns (suggested "10.250.N.0/24", [(what, cidr), ...] for the VPN ranges in use)."""
+    used: list[str] = []
+    vpns: list[tuple[str, str]] = []
+    try:
+        profiles = list(m.store.profiles().values())
+    except Exception:  # noqa: BLE001 - only used for a hint
+        profiles = []
+    for p in profiles:
+        sub = p.vpn_subnet
+        if not sub and p.addresses:
+            # Imported sites don't record the server's range; UniFi's is a /24 around the address.
+            try:
+                sub = str(ipaddress.ip_interface(p.addresses[0].split("/")[0] + "/24").network)
+            except ValueError:
+                sub = None
+        if sub:
+            used.append(sub)
+            vpns.append((p.display, sub))
+        used += list(p.routes) + list(p.installed_routes)
+    used += [n.cidr for n in networks] + _local_routes(m)
+    try:
+        suggestion = netutil.free_vpn_subnet(used)
+    except ValueError:
+        suggestion = "10.250.1.0/24"
+    return suggestion, vpns
+
+
+def unifi_server_help(m: Manager, networks=()) -> str:
+    suggestion, vpns = _vpn_subnets_in_use(m, networks)
+    gw_ip = netutil.first_host(suggestion)
+    in_use = ""
+    if vpns:
+        in_use = ("<br>Already used by your other sites: "
+                  + ", ".join(f"<b>{c}</b> ({w})" for w, c in vpns) + ".")
+    return f"""
 <b>Create a WireGuard VPN server on the console</b> (one time):
 <ol>
 <li><a href="https://unifi.ui.com">unifi.ui.com</a> → your console → <b>Network → Settings → VPN →
-    VPN Server → Create New → WireGuard</b>. Keep port <b>51820</b>. For the subnet use a
-    range used nowhere else, e.g. <b>10.250.1.1/24</b> (10.250.2.1/24 at your next site).</li>
-<li>UniFi asks for a client: name it after <b>this computer</b>. You only need its file if
-    CatFlap asks for one later. To be safe, click <b>download</b> (top of the client window,
-    next to the QR code) <b>before Save</b>; it can't be downloaded again after.</li>
+    VPN Server → Create New</b>. Choose <b>WireGuard</b> and give it a name.</li>
+<li><b>Server Address:</b> UniFi fills in the internet (WAN) address it sees and a port
+    (<b>51820</b>, or <b>51821</b> and up if there's already a server). Keep both, and note the
+    port.
+  <ul>
+  <li>If UniFi warns <i>"The server port needs to be forwarded on the upstream router as the
+      UniFi Gateway is behind NAT"</i>, or the IP Address starts with <b>10.</b>,
+      <b>192.168.</b> or <b>172.16–31.</b>, there's <b>another router in front of this one</b>
+      (for example a UniFi gateway behind your internet provider's router, or behind another
+      UniFi gateway). On <b>that</b> router, forward <b>UDP</b> on the port shown to the IP
+      Address shown. Then tick <b>Alternate Address for Clients</b> and enter the front
+      router's <b>public IP or Dynamic DNS name</b>, so this computer is told where to really
+      connect.</li>
+  <li>If it says the WAN IP is <i>dynamically assigned</i>, set up <b>Dynamic DNS</b> (Settings →
+      Internet → your WAN → Dynamic DNS) and use that name as the Alternate Address.</li>
+  </ul></li>
+<li><b>Add Client:</b> name it after <b>this computer</b>. You only need its file if CatFlap asks
+    for one later. To be safe, click <b>download</b> (top of the client window, next to the QR
+    code) <b>before Save</b>; it can't be downloaded again after.</li>
+<li><b>Advanced</b> (at the bottom): switch <b>Auto</b> to <b>Manual</b> and set <b>IPv4
+    Gateway/Subnet</b> to <b>{gw_ip}</b> with netmask <b>24</b>. UniFi's automatic choice
+    (usually 192.168.3.1) is the same at every UniFi site, so two sites would clash.{in_use}
+    Leave everything else under Advanced as it is.</li>
 <li><b>Save</b>, then <b>Apply Changes</b>, then click <b>Check again</b> here.</li>
 </ol>
-<small>Leave the rest as it is. Don't press ↻ next to the Public Key after downloading:
-it makes the file stop working. If CatFlap sets up its own client for this computer
-(named <i>catflap-…</i>), you can delete this one afterwards.</small>
+<small>Don't press ↻ next to the Public Key after downloading: it makes the file stop working.
+If CatFlap sets up its own client for this computer (named <i>catflap-…</i>), you can delete
+this one afterwards.</small>
 """
+
+
+def behind_nat_note(host: str, port: int | str) -> str:
+    """Why a private address can't be reached from outside, and what to do (HTML)."""
+    return (f"<p style='color:#B45309'><b>{host} is a private address.</b> This router sits "
+            "behind another router (for example your internet provider's box, or another UniFi "
+            "gateway), so it can only be reached at that address from the same network. To "
+            "reach it from anywhere else:</p><ol>"
+            f"<li>On the router in front, forward <b>UDP port {port}</b> to <b>{host}</b>.</li>"
+            "<li>Enter the front router's <b>public IP address or Dynamic DNS name</b> below "
+            "(UniFi: tick <i>Alternate Address for Clients</i> on the VPN server and enter it "
+            "there too, so new client files get it).</li></ol>")
+
 
 FILE_HELP = {
     "unifi": """<p><b>Get this computer's WireGuard file from UniFi:</b>
@@ -105,6 +186,10 @@ VPN Server</b> → your WireGuard server.</p><ul>
 <li>Just created the server with a client for this computer? Use the file you downloaded.</li>
 <li>Otherwise: <b>Add Client</b>, name it after this computer, click <b>download</b> at the top
     of the client window <b>before Save</b>, then <b>Save</b> and <b>Apply Changes</b>.</li></ul>
+<p>The file's <b>Endpoint</b> is the server's <i>Server Address</i>. If that's a private address
+(10.x, 192.168.x, 172.16–31.x) because this router is behind another one, forward the server's
+UDP port on the router in front and type that router's public IP or Dynamic DNS name in the box
+below (or tick <i>Alternate Address for Clients</i> on the server before downloading).</p>
 <p><small>One client per computer. Leave Pre-Shared Key and Networks Behind Client off, and
 don't press ↻ next to the Public Key after downloading.</small></p>""",
     "alta": """<p><b>Get a WireGuard file from Alta Labs</b> (Route10, Control 1.0q or later):</p><ol>
@@ -526,7 +611,17 @@ class ServerPage(_Page):
         self.setTitle("Checking your router's VPN server")
         lay = QtWidgets.QVBoxLayout(self)
         self.text = QtWidgets.QTextBrowser()
+        self.text.setOpenExternalLinks(True)
         lay.addWidget(self.text, 1)
+        self.public_row = QtWidgets.QWidget()
+        pr = QtWidgets.QFormLayout(self.public_row)
+        pr.setContentsMargins(0, 0, 0, 0)
+        self.public = QtWidgets.QLineEdit()
+        self.public.setPlaceholderText("the front router's public IP or DDNS name, e.g. myhome.ddns.net")
+        pr.addRow("Site's internet address", self.public)
+        self.public_row.setVisible(False)
+        lay.addWidget(self.public_row)
+        self.private_wan: str | None = None
         self.again = QtWidgets.QPushButton("Check again")
         self.again.clicked.connect(self.check)
         self.file_btn = QtWidgets.QPushButton("Continue with a downloaded WireGuard file")
@@ -540,8 +635,12 @@ class ServerPage(_Page):
 
     def initializePage(self) -> None:  # noqa: N802 (Qt API)
         self.wiz.unifi_file = False
+        self.wiz.endpoint = None
         self.file_btn.setVisible(False)
         self.check()
+
+    def _help(self) -> str:
+        return unifi_server_help(self.wiz.m, self.wiz.networks)
 
     def _use_file(self) -> None:
         self.wiz.unifi_file = True
@@ -551,6 +650,8 @@ class ServerPage(_Page):
 
     def check(self) -> None:
         self.ok = False
+        self.private_wan = None
+        self.public_row.setVisible(False)
         self.completeChanged.emit()
         self.again.setEnabled(False)
         self.text.setHtml("<p>Checking…</p>")
@@ -573,9 +674,9 @@ class ServerPage(_Page):
         self.again.setEnabled(True)
         if err is None and res and res[0] == "refused":
             _, nets, why, servers = res
-            self.wiz.networks = nets
+            self.wiz.networks = nets   # before _help(): its subnet suggestion avoids these
             if not any(sv.get("enabled", True) for sv in servers):
-                self.text.setHtml(UNIFI_SERVER_HELP)      # problem #1: create the server first
+                self.text.setHtml(self._help())      # problem #1: create the server first
                 return
             self.text.setHtml(
                 "<p><b>CatFlap can see your sites and networks, but UniFi's cloud doesn't let it "
@@ -590,17 +691,26 @@ class ServerPage(_Page):
         if err is not None:
             msg = friendly_error(err)
             if "No WireGuard VPN server" in msg or "not fully created" in msg:
-                self.text.setHtml(UNIFI_SERVER_HELP)
+                self.text.setHtml(self._help())
             else:
                 self.text.setHtml(f"<p><b>Something went wrong:</b></p><p>{msg}</p>"
                                   "<p>Fix it and click <b>Check again</b>.</p>")
             return
         srv, wan, nets = res
         if not (srv.enabled and srv.public_key and srv.port):
-            self.text.setHtml(UNIFI_SERVER_HELP)
+            self.text.setHtml(self._help())
             return
         self.wiz.networks = nets
         html = (f"<p>✓ Found the WireGuard VPN server <b>{srv.name}</b> (port {srv.port}).</p>")
+        if srv.subnet:
+            free, vpns = _vpn_subnets_in_use(self.wiz.m, nets)
+            others = [w for w, c in vpns if netutil.overlaps(c, srv.subnet)]
+            if others:
+                html += (f"<p style='color:#B45309'><b>Note:</b> this server's VPN range "
+                         f"{srv.subnet} is also used by {', '.join(others)}, so the two can't be "
+                         "connected at the same time. To fix it, edit the server in UniFi → "
+                         "Advanced → Manual and set IPv4 Gateway/Subnet to "
+                         f"{netutil.first_host(free)} / 24.</p>")
         if wan.ddns_hostname:
             html += f"<p>✓ The site will be reached at <b>{wan.ddns_hostname}</b>.</p>"
         elif wan.wan_ip:
@@ -612,16 +722,34 @@ class ServerPage(_Page):
                      "shares one public address between many customers (\"CGNAT\"). A VPN can't "
                      "reach the site from outside until the provider gives you a public IP "
                      "address. You can continue, but connecting will likely fail.</p>")
+        elif wan.wan_ip and netutil.is_private(wan.wan_ip) and not wan.ddns_hostname:
+            html += behind_nat_note(wan.wan_ip, srv.port)
+            self.private_wan = wan.wan_ip
+            self.public_row.setVisible(True)
         elif wan.wan_ip and netutil.is_private(wan.wan_ip):
             html += ("<p style='color:#B45309'><b>Note:</b> there's another router in front of "
-                     f"this one. Ask whoever manages it to forward UDP port {srv.port} to your "
-                     "UniFi router.</p>")
+                     f"this one. Forward UDP port {srv.port} on it to {wan.wan_ip}.</p>")
         self.text.setHtml(html)
         self.ok = True
         self.completeChanged.emit()
 
     def isComplete(self) -> bool:  # noqa: N802 (Qt API)
         return self.ok
+
+    def validatePage(self) -> bool:  # noqa: N802 (Qt API)
+        if self.wiz.unifi_file or not self.private_wan:
+            return True
+        public = self.public.text().strip()
+        if public:
+            self.wiz.endpoint = public
+            return True
+        ans = QtWidgets.QMessageBox.question(
+            self, "Only reachable at home?",
+            f"Without the front router's public address, this site will be set up to connect to "
+            f"{self.private_wan}, which only works from the same network as the router.\n\n"
+            "Continue anyway? (You can add the address later: Edit the site → Site's internet "
+            "address.)")
+        return ans == QtWidgets.QMessageBox.Yes
 
     def nextId(self) -> int:  # noqa: N802 (Qt API)
         return P_FILE if self.wiz.unifi_file else P_NETWORKS
@@ -737,8 +865,8 @@ class FilePage(_Page):
         lay.addLayout(row)
         form = QtWidgets.QFormLayout()
         self.endpoint = QtWidgets.QLineEdit()
-        self.endpoint.setPlaceholderText("optional, e.g. myhome.ddns.net")
-        form.addRow("Site's internet name (if the file has an IP that changes)", self.endpoint)
+        self.endpoint.setPlaceholderText("optional: public IP or DDNS name, e.g. myhome.ddns.net")
+        form.addRow("Site's internet address (if the file's is private or changes)", self.endpoint)
         lay.addLayout(form)
         self.path.textChanged.connect(self.completeChanged)
 
@@ -768,9 +896,31 @@ class FilePage(_Page):
             QtWidgets.QMessageBox.warning(self, "CatFlap", "That doesn't look like a WireGuard "
                                           f"configuration file:\n\n{friendly_error(e)}")
             return False
+        typed = self.endpoint.text().strip()
+        if not typed and netutil.is_private(cfg.endpoint_host):
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Warning)
+            box.setWindowTitle("Only reachable at home?")
+            box.setTextFormat(Qt.RichText)
+            box.setText(f"The file connects to <b>{cfg.endpoint_host}:{cfg.endpoint_port}</b>."
+                        + behind_nat_note(cfg.endpoint_host, cfg.endpoint_port)
+                        + "<p>Go back and enter the address, or continue anyway (it can be "
+                          "added later: Edit the site → Site's internet address)?</p>")
+            back = box.addButton("Enter the address", QtWidgets.QMessageBox.RejectRole)
+            go_on = box.addButton("Continue anyway", QtWidgets.QMessageBox.AcceptRole)
+            box.setDefaultButton(back)
+            box.exec()
+            if box.clickedButton() is not go_on:
+                self.endpoint.setFocus()
+                return False
+        elif not typed and netutil.is_cgnat(cfg.endpoint_host):
+            QtWidgets.QMessageBox.warning(
+                self, "CatFlap", f"The file connects to {cfg.endpoint_host}, a shared "
+                "internet-provider address (CGNAT). A VPN can't reach the site there; the site "
+                "needs a public IP address from its provider.")
         self.wiz.conf_path = path
         self.wiz.manual_cfg = None
-        self.wiz.endpoint = self.endpoint.text().strip() or None
+        self.wiz.endpoint = typed or None
         self.wiz.file_routes = [r for r in cfg.allowed_ips
                                 if not netutil.is_default_route(r) and netutil.net(r).version == 4]
         return True
@@ -960,7 +1110,7 @@ class NamePage(_Page):
                                        endpoint=w.endpoint, color=color, label=label)
         else:
             fn = lambda: m.provision(w.gateway, name, w.routes, site=w.site.id,  # noqa: E731
-                                     color=color, label=label)
+                                     endpoint=w.endpoint, color=color, label=label)
         try:
             w.result = run_blocking(self, f"Setting up {label}…", fn)
         except Exception as e:  # noqa: BLE001

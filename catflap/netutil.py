@@ -121,3 +121,19 @@ def suggest_vpn_subnet(index: int) -> str:
     if not 0 <= index <= 255:
         raise ValueError("site index must be 0-255")
     return f"10.250.{index}.0/28"
+
+
+def free_vpn_subnet(used: Iterable[str], third_octets: Iterable[int] = range(1, 255)) -> str:
+    """The first 10.250.<n>.0/24 that overlaps none of ``used`` (networks or
+    addresses already in play: other sites' LANs, VPN subnets, client addresses)."""
+    taken = []
+    for u in used:
+        try:
+            taken.append(net(u if "/" in u else f"{u}/32"))
+        except ValueError:
+            continue
+    for n in third_octets:
+        cand = ipaddress.ip_network(f"10.250.{n}.0/24")
+        if not any(cand.version == t.version and cand.overlaps(t) for t in taken):
+            return str(cand)
+    raise ValueError("no free 10.250.x.0/24 left")

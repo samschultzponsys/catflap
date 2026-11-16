@@ -722,3 +722,82 @@ def test_update_check_is_fresh_and_opens_the_window_once_per_version(qapp, manag
     app._periodic_update_check()                               # hours later: same version
     wait_for(qapp, lambda: shown)
     assert opened == ["2.0"] and "2.0" in shown[0] and calls == [True, True]
+
+
+def test_wizard_ignores_next_while_working(qapp, manager, no_popups):
+    """A second click on Next while a step is still working must not run it again."""
+    import threading
+    from catflap import ui_common
+    w = ui_wizards.SiteWizard(manager)
+    w.show()
+    nxt = w.button(QtWidgets.QWizard.NextButton)
+    release = threading.Event()
+    calls, seen = [], {}
+
+    def slow():
+        calls.append(1)
+        release.wait(5)
+        return "ok"
+
+    def click_again():
+        seen["busy"] = ui_common.is_busy(w)
+        seen["next_enabled"] = nxt.isEnabled()
+        seen["validated"] = w.validateCurrentPage()        # what Next would do
+        nxt.click()                                         # a real second click
+        release.set()
+
+    from PySide6 import QtCore
+    QtCore.QTimer.singleShot(50, click_again)
+    assert ui_common.run_blocking(w.currentPage(), "Working…", slow) == "ok"
+    assert calls == [1]
+    assert seen == {"busy": True, "next_enabled": False, "validated": False}
+    assert nxt.isEnabled() and not ui_common.is_busy(w)    # back to normal afterwards
+
+
+def test_unifi_server_help_suggests_a_free_subnet(qapp, manager):
+    from catflap.model import Network
+    html = ui_wizards.unifi_server_help(manager, [Network("LAN", "10.250.1.0/24")])
+    assert "Alternate Address for Clients" in html and "Manual" in html
+    assert "10.250.2.1" in html                             # 10.250.1.x is the site's LAN
+
+
+def test_file_page_warns_about_a_private_endpoint(qapp, manager, no_popups, unifi_conf, tmp_path,
+                                                  monkeypatch):
+    conf = tmp_path / "home.conf"
+    conf.write_text(unifi_conf.read_text().replace("203.0.113.10:51820", "10.0.1.30:51821"))
+    asked = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda self: asked.append(self.text()) or 0)
+    w = ui_wizards.SiteWizard(manager)
+    w.show()
+    pick(w, "alta")
+    fp = w.currentPage()
+    fp.path.setText(str(conf))
+    w.next()                                                # dialog "closed" without a choice
+    assert asked and "10.0.1.30" in asked[0] and "UDP port 51821" in asked[0]
+    fp.endpoint.setText("home.example.net")
+    w.next()
+    assert w.currentId() == ui_wizards.P_SITE_NETS and w.endpoint == "home.example.net"
+
+
+def test_site_wizard_double_nat_asks_for_the_public_address(qapp, manager, no_popups, monkeypatch):
+    """A UniFi gateway behind another router (e.g. a UDM Pro behind a UCG Fiber) reports a
+    private WAN address; the site must be set up with the front router's public address."""
+    from catflap.model import WanInfo
+    from conftest import FakeDriver
+    monkeypatch.setattr(FakeDriver, "get_wan_info", lambda self, site: WanInfo(wan_ip="10.0.1.30"))
+    w = ui_wizards.SiteWizard(manager)
+    w.gateway = "home-gw"
+    w.setStartId(ui_wizards.P_SITE)
+    w.restart()
+    w.show()
+    w.next()
+    server = w.currentPage()
+    wait_for(qapp, lambda: server.ok)
+    assert not server.public_row.isHidden()
+    assert "10.0.1.30" in server.text.toPlainText()
+    server.public.setText("home.example.net")
+    w.next()
+    w.next()
+    w.next()
+    assert w.currentId() == ui_wizards.P_DONE, no_popups
+    assert w.result.profile.endpoint_host == "home.example.net"

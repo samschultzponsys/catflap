@@ -107,7 +107,15 @@ def preflight(profile: Profile, local: LocalNetwork, others: dict[str, tuple[Pro
 
     # -- endpoint (#9) ---------------------------------------------------------
     endpoint_ips: list[str] = []
-    if netutil.is_ip(profile.endpoint_host):
+    if netutil.is_private(profile.endpoint_host):
+        endpoint_ips = [profile.endpoint_host]
+        out.append(Finding(WARN, "endpoint-private",
+                           f"The site's address {profile.endpoint_host} is private: the router is "
+                           "behind another router and can only be reached this way from the same "
+                           f"network. Forward UDP {profile.endpoint_port} to it on the front "
+                           "router and set the site's address to that router's public IP or "
+                           "DDNS name.", 10))
+    elif netutil.is_ip(profile.endpoint_host):
         endpoint_ips = [profile.endpoint_host]
         out.append(Finding(WARN, "endpoint-raw-ip",
                            f"Endpoint is a raw IP ({profile.endpoint_host}). If the site's WAN IP "
@@ -233,6 +241,30 @@ def preflight(profile: Profile, local: LocalNetwork, others: dict[str, tuple[Pro
     return out
 
 
+def no_handshake_text(profile: Profile, sent: int) -> str:
+    """Why the site's VPN server didn't answer, most likely cause first, in plain words."""
+    host, port = profile.endpoint_host, profile.endpoint_port
+    head = f"No answer from the site's VPN server at {host}:{port} ({sent} bytes sent, 0 received)."
+    tail = " The tunnel was disconnected; your normal internet is unaffected."
+    if netutil.is_private(host):
+        return (head + f" {host} is a private address: this router is behind another router, so "
+                "it can only be reached that way from the same network. On the router in front, "
+                f"forward UDP port {port} to {host}, then Edit the site and set Site's internet "
+                "address to the front router's public IP or DDNS name." + tail)
+    if netutil.is_cgnat(host) or (profile.wan_ip and netutil.is_cgnat(profile.wan_ip)):
+        return (head + " The site's internet provider shares one public address between many "
+                "customers (CGNAT), so it can't be reached from outside; ask the provider for a "
+                "public IP address." + tail)
+    behind = ""
+    if profile.wan_ip and netutil.is_private(profile.wan_ip):
+        behind = (f" The router is behind another router: UDP port {port} must be forwarded on "
+                  f"the front one to {profile.wan_ip}.")
+    return (head + behind + " Check that: the VPN server was created and Apply Changes was "
+            f"clicked on the router; UDP port {port} reaches it (port forwarding if there's a "
+            f"router in front); {host} is the site's current address; and this computer's VPN "
+            "client hasn't been removed or reused on another device." + tail)
+
+
 def health(profile: Profile, backend: Backend, wait: float = 8,
            sleep: Callable[[float], None] = time.sleep) -> list[Finding]:
     """Verify the tunnel actually carries traffic (#1, #9, #10, #11)."""
@@ -253,14 +285,7 @@ def health(profile: Profile, backend: Backend, wait: float = 8,
     handshake = st.last_handshake is not None or rx > 0
 
     if not handshake:
-        return [Finding(ERROR, "no-handshake",
-                        f"No WireGuard handshake ({st.tx_bytes or 0} bytes sent, 0 received). "
-                        "Usual causes: (1) the VPN server was never created/applied on the "
-                        "gateway; (10) the site is behind CGNAT or UDP "
-                        f"{profile.endpoint_port} isn't forwarded; (9) the endpoint "
-                        f"{profile.endpoint_host} points at an old IP; (11) this client was "
-                        "revoked or its key is used by another device. The tunnel was "
-                        "disconnected; your normal internet is unaffected (split tunnel).", 1)]
+        return [Finding(ERROR, "no-handshake", no_handshake_text(profile, st.tx_bytes or 0), 1)]
     out = [Finding(OK, "handshake", f"Handshake OK ({rx} bytes received).")]
     if target and not pinged:
         out.append(Finding(WARN, "ping-failed",
