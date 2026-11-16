@@ -121,13 +121,14 @@ def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
         p.drawPath(_arch_path(s))
         if error:
             _badge(p, s, RED, "")
-    if adguard in ("on", "paused", "off"):
+    if adguard in SHIELD_STATES:
         _shield(p, s, adguard)
     p.end()
     return pm
 
 
 AMBER = "#F59E0B"
+SHIELD_STATES = ("on", "paused", "off", "attention")
 
 
 def shield_path(s: float, x: float = 0.0, y: float = 0.0) -> "QtGui.QPainterPath":
@@ -146,13 +147,12 @@ def shield_path(s: float, x: float = 0.0, y: float = 0.0) -> "QtGui.QPainterPath
 def _shield(p: "QtGui.QPainter", s: float, state: str) -> None:
     """AdGuard status shield, top-left corner (the VPN dot is bottom-right)."""
     path = shield_path(s)
-    fill = {"on": GREEN, "paused": AMBER, "off": "#F8FAFC"}[state]
-    p.setPen(QtGui.QPen(QtGui.QColor("white" if state != "off" else GREY), 2.5 * s,
-                        Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    fill = {"on": GREEN, "paused": AMBER, "off": "#F8FAFC", "attention": "#F8FAFC"}[state]
+    ink = {"off": GREY, "attention": RED}.get(state, "white")
+    p.setPen(QtGui.QPen(QtGui.QColor(ink), 2.5 * s, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
     p.setBrush(QtGui.QColor(fill))
     p.drawPath(path)
-    mark = QtGui.QPen(QtGui.QColor("white" if state != "off" else GREY), 3 * s,
-                      Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    mark = QtGui.QPen(QtGui.QColor(ink), 3 * s, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
     p.setPen(mark)
     p.setBrush(Qt.NoBrush)
     if state == "on":
@@ -164,6 +164,9 @@ def _shield(p: "QtGui.QPainter", s: float, state: str) -> None:
     elif state == "paused":
         p.drawLine(QtCore.QPointF(10 * s, 9.5 * s), QtCore.QPointF(10 * s, 19 * s))
         p.drawLine(QtCore.QPointF(16 * s, 9.5 * s), QtCore.QPointF(16 * s, 19 * s))
+    elif state == "attention":                     # "!": CatFlap needs something from you
+        p.drawLine(QtCore.QPointF(13 * s, 8 * s), QtCore.QPointF(13 * s, 16.5 * s))
+        p.drawPoint(QtCore.QPointF(13 * s, 21 * s))
     else:
         p.drawLine(QtCore.QPointF(7 * s, 21 * s), QtCore.QPointF(19 * s, 8 * s))
 
@@ -172,7 +175,7 @@ def shield_icon(state: str, size: int = 32) -> "QtGui.QIcon":
     """The shield alone, for menu items."""
     pm = QtGui.QPixmap(size, size)
     pm.fill(Qt.transparent)
-    if state in ("on", "paused", "off"):
+    if state in SHIELD_STATES:
         p = QtGui.QPainter(pm)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         p.translate(size * 3 / 64, size * 2 / 64)

@@ -160,4 +160,71 @@ class HttpsCheckDialog(_Dialog):
             "Authorities → Import, then tick \"Trust this CA to identify websites\").")
 
 
-__all__ = ["HttpsCheckDialog", "ExcludeDialog", "TextDialog"]
+class FlatpakPermissionDialog(_Dialog):
+    """Flatpak: AdGuard runs on this computer but the sandbox can't control it.
+    Shows the one command to run, with Copy and Restart."""
+
+    def __init__(self, seen: bool, declined: bool, parent=None):
+        super().__init__(parent)
+        self.restart_now = False
+        self.setWindowTitle("Let CatFlap control AdGuard")
+        self.resize(640, 0)
+        lay = QtWidgets.QVBoxLayout(self)
+        head = ("<h3 style='margin:0'>AdGuard is running on this computer</h3>" if seen else
+                "<h3 style='margin:0'>Let CatFlap control AdGuard</h3>")
+        lab = QtWidgets.QLabel(
+            head + "CatFlap is installed as a Flatpak, which keeps it in a sandbox. To show "
+            "AdGuard's status and turn it on, off or pause it, CatFlap needs to run "
+            "<code>adguard-cli</code> outside the sandbox. Allow it once by running this "
+            "command in a terminal (Konsole), then click <b>Restart CatFlap</b>:")
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        row = QtWidgets.QHBoxLayout()
+        self.cmd = QtWidgets.QLineEdit(adguard.FLATPAK_OVERRIDE)
+        self.cmd.setReadOnly(True)
+        self.cmd.setCursorPosition(0)
+        f = self.cmd.font()
+        f.setFamily("monospace")
+        self.cmd.setFont(f)
+        row.addWidget(self.cmd, 1)
+        copy = QtWidgets.QPushButton("Copy")
+        copy.clicked.connect(self.copy)
+        row.addWidget(copy)
+        lay.addLayout(row)
+        self.copied = QtWidgets.QLabel("")
+        lay.addWidget(self.copied)
+        note = QtWidgets.QLabel(
+            "<small>This lets CatFlap run commands on your computer outside the sandbox (it "
+            "also lets CatFlap install its own updates). If you'd rather not, install the "
+            "CatFlap RPM instead, which doesn't need it. Until it's allowed, CatFlap asks again "
+            "each time it starts and shows a red ! shield on its tray icon.</small>")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        self.never = QtWidgets.QCheckBox("Don't ask again: I don't want CatFlap to control AdGuard")
+        self.never.setChecked(declined)
+        lay.addWidget(self.never)
+        bb = QtWidgets.QHBoxLayout()
+        bb.addStretch(1)
+        later = QtWidgets.QPushButton("Later")
+        later.clicked.connect(self.reject)
+        bb.addWidget(later)
+        restart = QtWidgets.QPushButton("I've run it: Restart CatFlap")
+        restart.setDefault(True)
+        restart.clicked.connect(self.restart)
+        bb.addWidget(restart)
+        lay.addLayout(bb)
+
+    @property
+    def declined(self) -> bool:
+        return self.never.isChecked()
+
+    def copy(self) -> None:
+        QtWidgets.QApplication.clipboard().setText(adguard.FLATPAK_OVERRIDE)
+        self.copied.setText("<small>Copied. Paste it into a terminal and press Enter.</small>")
+
+    def restart(self) -> None:
+        self.restart_now = True
+        self.accept()
+
+
+__all__ = ["HttpsCheckDialog", "ExcludeDialog", "FlatpakPermissionDialog", "TextDialog"]

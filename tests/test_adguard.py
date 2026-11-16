@@ -457,3 +457,69 @@ def test_adguard_cli_listed_on_linux(fake_cli):
     found = conflicts.detect(B(), "linux")
     assert [f.key for f in found] == ["adguard-cli"] and found[0].conflict.compatible
     assert conflicts.to_warn(found, {}) == []
+
+
+# ============================================================ update steps, sandbox detection
+def test_update_stops_first_and_starts_after(fake_cli):
+    ag = adguard.AdGuard(adguard.Host(flatpak=False))
+    exe = str(fake_cli / "adguard-cli")
+    assert adguard.update_script(ag, running=True) == f"{exe} stop && {exe} update ; {exe} start"
+    assert adguard.update_script(ag, running=False) == f"{exe} update"
+    host = adguard.Host(flatpak=False)
+    host.which = lambda n: "/usr/bin/konsole" if n == "konsole" else None
+    argv = adguard.terminal_argv(host, adguard.update_script(ag, True), "AdGuard: update")
+    assert argv[:4] == ["konsole", "-e", "bash", "-c"] and f"{exe} stop && {exe} update" in argv[4]
+
+
+def test_proxy_answers_and_sandbox_detection():
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    def serve():
+        c, _ = srv.accept()
+        c.recv(1024)
+        c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        c.close()
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    assert adguard.proxy_answers(port)
+    t.join(2)
+    srv.close()
+    assert not adguard.proxy_answers(port)                       # nothing listening now
+    seen = adguard.Probe("example.com", reachable=True, intercepted=True)
+    clean = adguard.Probe("example.com", reachable=True)
+    assert adguard.detect_from_sandbox(lambda *a, **k: seen, proxy_fn=lambda: False)
+    assert adguard.detect_from_sandbox(lambda *a, **k: clean, proxy_fn=lambda: True)
+    assert not adguard.detect_from_sandbox(lambda *a, **k: clean, proxy_fn=lambda: False)
+
+
+DEFAULT_APPS = """apps:
+  - include-list: browsers.yaml
+  - name: '*vpn*'
+    action: 'bypass'
+  - name: '*'
+    action: 'bypass_https'
+"""
+
+
+def test_browsers_only_default_and_non_browser_apps(fake_cli, tmp_path):
+    """Sam's setup: AdGuard filters HTTPS in browsers only; Steam (Flatpak) has its own store."""
+    assert adguard.browsers_only(DEFAULT_APPS)
+    assert not adguard.browsers_only("apps:\n  - include-list: browsers.yaml\n")
+    (fake_cli / "proxy.yaml").write_text(DEFAULT_APPS)
+    (fake_cli / "state").write_text("on\n")
+    ca, _ = make_ca("AdGuard CLI CA", "AdGuard")
+    home = tmp_path / "home"
+    steam = home / ".var/app/com.valvesoftware.Steam/.pki/nssdb"
+    steam.mkdir(parents=True)
+    (steam / "cert9.db").write_bytes(b"SQLite")
+    host = FakeHost(home, bundle=adguard.cert_pem(ca), certutil=True)
+    not_filtered = lambda name, port=443: adguard.Probe(name, reachable=True, verified=True)  # noqa: E731
+    rep = adguard.https_report(adguard.AdGuard(host), {}, probe_fn=not_filtered,
+                               fetch_fn=lambda port: ca)
+    by = {c.title: c for c in rep.checks}
+    assert by["HTTPS filtering"].result == adguard.OK and "only in browsers" in by["HTTPS filtering"].detail
+    assert by["Steam (Flatpak)"].result == adguard.INFO and by["Steam (Flatpak)"].fix_label == "Add anyway"
+    assert not rep.problems

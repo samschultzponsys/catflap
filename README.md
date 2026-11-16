@@ -613,7 +613,7 @@ button. With no sites yet, it shows a big **Add your first site** button.
     - **Blue:** always the blue app icon.
   - **Grey outline with a red dot:** the last connection attempt failed.
   - **Shield in the top-left corner** (Linux, only with AdGuard for Linux installed):
-    AdGuard's state; see [AdGuard ad blocker (Linux)](#adguard-ad-blocker-linux).
+    AdGuard's state; see [AdGuard Ad Blocking (Linux)](#adguard-ad-blocker-linux).
 - **Clicking it:**
   - **Left-click** shows or hides the window.
   - **Right-click** lists your sites with their status. Click one to connect or
@@ -622,7 +622,7 @@ button. With no sites yet, it shows a big **Add your first site** button.
     **Quit**.
 - **Notifications** on connect, disconnect and failure, with the reason in plain words.
 
-### AdGuard ad blocker (Linux)
+### AdGuard Ad Blocking (Linux)
 
 CatFlap doesn't block ads itself. If you've installed **AdGuard for Linux** (the
 `adguard-cli` app from adguard.com, with your license activated), CatFlap gives it the
@@ -632,25 +632,27 @@ tray controls the AdGuard Windows app has. Nothing appears if it isn't installed
 
 | Shield | AdGuard |
 |---|---|
+| Red outline with **!** | Flatpak: AdGuard runs, but CatFlap needs permission to control it |
 | Green with a tick | Protecting |
 | Amber with a pause mark | Paused (by CatFlap's **Pause**) |
 | White with a grey slash | Turned off |
 | None | Not installed, or the shield is turned off in Settings |
 
 Hovering the icon says the same in words (*AdGuard: Paused, 8 min left*).
-**Settings → AdGuard ad blocker → Show AdGuard's status on the tray icon** hides the shield.
+**Settings → AdGuard Ad Blocking → Show AdGuard's status on the tray icon** hides the shield.
 
 **Tray menu:**
 
-- **AdGuard ad blocking: <state>**: tick to turn protection on, untick to turn it off
+- **AdGuard Ad Blocking: <state>**: tick to turn protection on, untick to turn it off
   (`adguard-cli start` / `stop`).
 - **Pause AdGuard ▸** *For 5 minutes / 30 minutes / 1 hour / Until I resume*: stops
   protection and turns it back on when the time is up (CatFlap must be running then).
   **Resume AdGuard now** ends a pause early. If AdGuard is started some other way while
   paused, the pause is forgotten.
 - **Update AdGuard to X…**: appears when `adguard-cli` reports a newer version (CatFlap
-  also shows a notification, once per version). It runs `adguard-cli update` in a
-  terminal so you can see progress and type your password if asked.
+  also shows a notification, once per version). It runs in a terminal so you can see
+  progress and type your password if asked. AdGuard can't update while it's running, so
+  CatFlap stops it, updates, and starts it again.
 - **AdGuard ▸** *Check HTTPS filtering…*, *Exclude an app from HTTPS filtering…*,
   *Show filter lists*, *Check for AdGuard and filter updates*, *Connect the AdGuard
   browser extension* (`install-browser-integration`), *License information*
@@ -665,9 +667,12 @@ lets sudo ask in a window when a graphical password helper is installed
 (`ksshaskpass` on KDE: `sudo dnf install ksshaskpass`). Without one, CatFlap offers to
 open a terminal to run the command.
 
-**Flatpak:** AdGuard is outside CatFlap's sandbox. To let CatFlap control it, run this once
-and restart CatFlap (it lets CatFlap run commands outside the sandbox; the RPM doesn't
-need it):
+**Flatpak:** AdGuard is outside CatFlap's sandbox. As soon as CatFlap notices AdGuard
+running on the computer (its proxy answers, or it re-signs HTTPS), it pops up the one
+command to run, with **Copy** and **I've run it: Restart CatFlap**. Until it's allowed,
+CatFlap asks at every start (unless you tick *Don't ask again*), shows a red **!** shield
+on its tray icon, and the tray menu has **⚠ Let CatFlap control AdGuard…**. The command
+(it lets CatFlap run commands outside the sandbox; the RPM doesn't need it):
 
 ```bash
 flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.samschultzponsys.CatFlap
@@ -690,6 +695,10 @@ often breaks things:
 | Each Firefox-family profile | Firefox from Flathub or mozilla.org, LibreWolf, Floorp, Zen, Thunderbird | Each profile has its own list |
 | `~/.pki/nssdb` (and the same inside each Flatpak browser) | Chrome, Chromium, Brave, Edge, Vivaldi | Flatpak browsers never see the system list |
 | The app itself | Apps that pin certificates (banking, some games and chat apps, Electron/Node/Python tools with their own list) | Can't be fixed by trusting: exclude the app |
+
+By default AdGuard filters HTTPS **only in browsers** (its `proxy.yaml` ends with a
+`'*'` → `bypass_https` rule), so other apps, CatFlap included, aren't affected; the check
+says so, and lists non-browser apps with their own store (Steam, Discord…) as information.
 
 **AdGuard ▸ Check HTTPS filtering…** checks all of these and lists each with ✔ / ✖, and a
 **Fix** button where CatFlap can fix it:
@@ -725,7 +734,7 @@ the gateway's address to AdGuard's HTTPS exclusions.
   **Settings → Ask again what the close button does** brings the question back.
   Connected sites stay connected either way.
 - **Settings:** *Start CatFlap when I log in*, *Check for updates automatically*, and
-  on Linux **AdGuard ad blocker ▸** (*Show AdGuard's status on the tray icon*, *Check
+  on Linux **AdGuard Ad Blocking ▸** (*Show AdGuard's status on the tray icon*, *Check
   HTTPS filtering…*, *Exclude an app from HTTPS filtering…*).
 - **File:** *Export everything…* and *Import from another computer…* (locked with
   a passphrase).
@@ -847,6 +856,12 @@ countdown (**Don't restart now** cancels it), or you can click **Restart
 CatFlap**. It closes the app and opens the new version. Connected sites stay
 connected. After the restart, CatFlap confirms the version it is now running, or
 tells you if the update wasn't installed yet.
+
+**Installed some other way?** CatFlap checks every minute whether a newer version was
+installed (by a command in a terminal, Discover or dnf, with or without the update
+window open) and restarts into it by itself, with a short notification. On Linux
+the old copy always ends and the new one starts a couple of seconds later, so the
+tray icon comes back reliably.
 
 **Flatpak specifics.** A sandboxed app can't install updates on the host by
 itself, so **Download and install** downloads `catflap-<v>.flatpak` to

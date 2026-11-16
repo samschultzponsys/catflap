@@ -119,7 +119,7 @@ class MainWindow(QtWidgets.QMainWindow if QtWidgets else object):
         sm.addAction("Check for other VPN software…",
                      lambda: self.app.check_conflicting_apps(manual=True))
         if sys.platform != "win32":
-            am = sm.addMenu("AdGuard ad blocker")
+            am = sm.addMenu("AdGuard Ad Blocking")
             self.a_adguard_show = am.addAction("Show AdGuard's status on the tray icon")
             self.a_adguard_show.setCheckable(True)
             self.a_adguard_show.setChecked(self.app.settings.get(adguard.SHOW_KEY, True))
@@ -380,6 +380,8 @@ class MainWindow(QtWidgets.QMainWindow if QtWidgets else object):
 # ============================================================ tray app
 class TrayApp(QtCore.QObject if QtCore else object):
     POLL_MS = 5000
+    INSTALL_CHECK_MS = 60_000      # look for a newer installed CatFlap every minute
+    SANDBOX_DETECT_S = 300         # Flatpak without permission: look for AdGuard every 5 min
     CYCLE_MS = 100          # tray color cycling: 100 ms steps,
     CYCLE_STEP = 0.04       # 2.5 s per site color
 
@@ -394,6 +396,9 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self.ag_busy = False
         self._ag_polling = False
         self.ag_update: str | None = None
+        self.ag_in_sandbox_seen = False     # Flatpak: AdGuard runs, but we may not control it
+        self._ag_detect_at = 0.0
+        self._ag_asked = False
         self.settings = self.m.store.settings()
         self.quitting = False
         self.paused = 0
@@ -422,6 +427,13 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self.poll()
         if self.settings.get("update_check", True):
             QtCore.QTimer.singleShot(3000, lambda: self.check_updates(interactive=False))
+        # Restart by ourselves when a newer CatFlap gets installed while we run
+        # (from the update window, a terminal, Discover or dnf).
+        self._restarting = False
+        self._install_checking = False
+        self._install_timer = QtCore.QTimer(self)
+        self._install_timer.timeout.connect(self.check_installed_version)
+        self._install_timer.start(self.INSTALL_CHECK_MS)
 
     # -- settings
     def set_setting(self, key: str, value: Any) -> None:
@@ -468,6 +480,8 @@ class TrayApp(QtCore.QObject if QtCore else object):
         failed = any(not e.startswith(INFO) for e in self.errors.values())
         style = self.settings.get("tray_style", "site")
         shield = self.ag_state if self.settings.get(adguard.SHOW_KEY, True) else None
+        if self.adguard_needs_permission and not self.settings.get("adguard_flatpak_declined"):
+            shield = "attention"
         return make_icon(colors, error=failed and not active, style=style, phase=self._phase,
                          adguard=shield)
 
@@ -501,6 +515,8 @@ class TrayApp(QtCore.QObject if QtCore else object):
         tip = "CatFlap: " + (", ".join(names) + " connected" if names else "not connected")
         if self.adguard_shown:
             tip += "\nAdGuard: " + adguard.describe(self.ag_state, self.settings)
+        elif self.adguard_needs_permission:
+            tip += "\nAdGuard: CatFlap needs permission to control it"
         self.tray.setToolTip(tip)
         self._build_menu()
         if self.window.isVisible():
@@ -529,6 +545,10 @@ class TrayApp(QtCore.QObject if QtCore else object):
         if self.adguard_shown:
             self._build_adguard_menu(m)
             m.addSeparator()
+        elif self.adguard_needs_permission:
+            m.addAction(shield_icon("attention"), "⚠ Let CatFlap control AdGuard…",
+                        self.adguard_flatpak_help)
+            m.addSeparator()
         m.addAction("Add a site…", self.add_site)
         m.addAction("Open CatFlap", self.show_window)
         if self.update_status and self.update_status.available:
@@ -543,6 +563,27 @@ class TrayApp(QtCore.QObject if QtCore else object):
         """AdGuard is installed and CatFlap can reach it."""
         return self.ag_state not in (adguard.MISSING, adguard.NO_ACCESS)
 
+    @property
+    def adguard_needs_permission(self) -> bool:
+        """Flatpak: AdGuard is running here but the sandbox can't control it yet."""
+        return self.ag_state == adguard.NO_ACCESS and self.ag_in_sandbox_seen
+
+    def _detect_in_sandbox(self) -> None:
+        import time
+        if time.monotonic() < self._ag_detect_at:
+            return
+        self._ag_detect_at = time.monotonic() + self.SANDBOX_DETECT_S
+        run_bg(adguard.detect_from_sandbox, self._detected_in_sandbox)
+
+    def _detected_in_sandbox(self, seen, err) -> None:
+        if err or not seen or self.ag_in_sandbox_seen:
+            return
+        self.ag_in_sandbox_seen = True
+        self._render()
+        if not self._ag_asked and not self.settings.get("adguard_flatpak_declined"):
+            self._ag_asked = True               # once per start, until it's allowed
+            QtCore.QTimer.singleShot(0, self.adguard_flatpak_help)
+
     def poll_adguard(self) -> None:
         if self._ag_polling or self.ag_busy or sys.platform == "win32":
             return
@@ -554,6 +595,8 @@ class TrayApp(QtCore.QObject if QtCore else object):
         if err or st is None:
             return
         self.ag_text = st.text
+        if st.state == adguard.NO_ACCESS:
+            self._detect_in_sandbox()
         if st.update != self.ag_update:
             self.ag_update = st.update
             self._build_menu()
@@ -576,7 +619,7 @@ class TrayApp(QtCore.QObject if QtCore else object):
     def _build_adguard_menu(self, m) -> None:
         st = self.ag_state
         label = "working…" if self.ag_busy else adguard.describe(st, self.settings)
-        a = m.addAction(shield_icon(st), f"AdGuard ad blocking: {label}")
+        a = m.addAction(shield_icon(st), f"AdGuard Ad Blocking: {label}")
         a.setCheckable(True)
         a.setChecked(st == adguard.ON)
         a.setEnabled(not self.ag_busy)
@@ -693,8 +736,14 @@ class TrayApp(QtCore.QObject if QtCore else object):
                                               "this in a terminal:\n\n" + " ".join(argv))
 
     def adguard_update(self) -> None:
-        """``adguard-cli update`` in a terminal: it may ask for a password and shows progress."""
-        self._adguard_terminal(self.ag.argv("update"))
+        """``adguard-cli update`` in a terminal (it may ask for a password and shows
+        progress). It refuses while the proxy runs, so stop it first and start it after."""
+        running = self.ag_state == adguard.ON
+        if not adguard.open_terminal(self.ag.host, adguard.update_script(self.ag, running),
+                                     "AdGuard: update"):
+            QtWidgets.QMessageBox.information(self.window, "AdGuard", "No terminal app found. Run "
+                                              "this in a terminal:\n\n"
+                                              + adguard.update_script(self.ag, running))
         self.ag.update_available = None             # re-learned from the next output if still due
         self.ag_update = None
         self._build_menu()
@@ -758,18 +807,61 @@ class TrayApp(QtCore.QObject if QtCore else object):
         QtWidgets.QMessageBox.information(self.window, "AdGuard", msg)
 
     def adguard_flatpak_help(self) -> None:
-        box = QtWidgets.QMessageBox(self.window)
-        box.setWindowTitle("AdGuard and the CatFlap Flatpak")
-        box.setText("CatFlap's Flatpak can't run AdGuard (it's outside the sandbox) until you "
-                    "allow it. Run this once in a terminal, then restart CatFlap:")
-        box.setInformativeText(adguard.FLATPAK_OVERRIDE + "\n\nThis lets CatFlap run commands "
-                               "on your computer outside the sandbox. If you'd rather not, install "
-                               "the CatFlap RPM instead.")
-        copy = box.addButton("Copy command", QtWidgets.QMessageBox.ActionRole)
-        box.addButton(QtWidgets.QMessageBox.Close)
-        self.run_dialog(box)
-        if box.clickedButton() is copy:
-            QtWidgets.QApplication.clipboard().setText(adguard.FLATPAK_OVERRIDE)
+        from .ui_adguard import FlatpakPermissionDialog
+        if getattr(self, "_perm_dialog_open", False):
+            return
+        self._perm_dialog_open = True
+        try:
+            dlg = FlatpakPermissionDialog(self.ag_in_sandbox_seen,
+                                          bool(self.settings.get("adguard_flatpak_declined")),
+                                          self.window)
+            self.run_dialog(dlg)
+        finally:
+            self._perm_dialog_open = False
+        self.set_setting("adguard_flatpak_declined", dlg.declined)
+        self._render()
+        if dlg.restart_now:
+            self.restart_app()
+
+    # -- restarting into a newly installed version
+    def check_installed_version(self) -> None:
+        if self._install_checking or self._restarting or sys.platform == "win32":
+            return
+        self._install_checking = True
+        run_bg(update.installed_version, self._installed_version_checked)
+
+    def _installed_version_checked(self, version, err) -> None:
+        from .version import is_newer
+        self._install_checking = False
+        if err or not version or self._restarting:
+            return
+        try:
+            newer = is_newer(version, __version__)
+        except ValueError:
+            return
+        if not newer:
+            return
+        self.settings["pending_update"] = version
+        self.m.store.save()
+        self.tray.showMessage("CatFlap", f"CatFlap {version} is installed. Restarting into it… "
+                              "Connected sites stay connected.",
+                              QtWidgets.QSystemTrayIcon.Information, 3000)
+        QtCore.QTimer.singleShot(2500, self.restart_app)
+
+    def restart_app(self, info=None) -> None:
+        """Start a fresh CatFlap (the latest installed version) and quit this one for sure."""
+        if self._restarting:
+            return
+        self._restarting = True
+        try:
+            update.restart(info)
+        except OSError as e:
+            self._restarting = False
+            QtWidgets.QMessageBox.warning(self.window, "CatFlap",
+                                          f"Couldn't restart automatically ({e}). Start CatFlap "
+                                          "again from your application menu.")
+            return
+        self.quit(force=True)
 
     # -- actions
     def _activated(self, reason) -> None:
@@ -924,13 +1016,7 @@ class TrayApp(QtCore.QObject if QtCore else object):
             self.quit()
             return
         if dlg.restart_requested:
-            try:
-                update.restart(st.install)
-            except OSError as e:
-                QtWidgets.QMessageBox.warning(self.window, "CatFlap",
-                                              f"Couldn't restart automatically ({e}). Start CatFlap "
-                                              "again from your application menu.")
-            self.quit()
+            self.restart_app(st.install)
 
     def check_conflicting_apps(self, manual: bool = False, found=None) -> None:
         """Look for other VPN software and list it with uninstall / don't-warn checkboxes.
@@ -1002,9 +1088,16 @@ class TrayApp(QtCore.QObject if QtCore else object):
         else:
             self.tray.showMessage(title, text, QtWidgets.QSystemTrayIcon.Information, 6000)
 
-    def quit(self) -> None:
+    def quit(self, force: bool = False) -> None:
+        """Quit. ``force``: also end the process within a few seconds even if something
+        (a stuck background job) would keep it alive, so a restart never leaves two."""
         self.quitting = True
         self.tray.hide()
+        if force and not os.environ.get("CATFLAP_NO_FORCE_EXIT"):
+            import threading
+            t = threading.Timer(4.0, lambda: os._exit(0))
+            t.daemon = True
+            t.start()
         self.qapp.quit()
 
 
