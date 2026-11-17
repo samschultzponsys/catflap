@@ -130,3 +130,9 @@ def manager(tmp_path, backend, monkeypatch):
 @pytest.fixture
 def unifi_conf():
     return DATA / "unifi-client.conf"
+
+
+@pytest.fixture(autouse=True)
+def _no_forced_exit(monkeypatch):
+    """TrayApp.quit(force=True) ends the process after a few seconds; never in tests."""
+    monkeypatch.setenv("CATFLAP_NO_FORCE_EXIT", "1")

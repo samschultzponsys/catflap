@@ -48,3 +48,10 @@ def test_suggest_subnet():
 def test_slug_allows_long_names():
     assert netutil.slug("Ponsys Office (Main Building)") == "ponsys-office-main-building"
     assert netutil.slug("Mum's House") == "mum-s-house"
+
+
+def test_free_vpn_subnet_skips_what_is_in_use():
+    from catflap.netutil import free_vpn_subnet
+    assert free_vpn_subnet([]) == "10.250.1.0/24"
+    assert free_vpn_subnet(["10.250.1.0/24", "10.250.2.5/32", "192.168.3.0/24"]) == "10.250.3.0/24"
+    assert free_vpn_subnet(["10.250.1.7"]) == "10.250.2.0/24"

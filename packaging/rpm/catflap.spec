@@ -1,5 +1,5 @@
 Name:           catflap
-Version:        1.7
+Version:        2.1
 Release:        1%{?dist}
 Summary:        Safe one-click WireGuard remote access to your sites
 License:        Apache-2.0
@@ -19,6 +19,8 @@ Requires:       iproute
 Requires:       iputils
 Recommends:     python3-pyside6
 Recommends:     wireguard-tools
+# AdGuard HTTPS check: add its certificate to browser profiles
+Recommends:     nss-tools
 
 %description
 catflap turns "I want remote access to site X" into a safe split-tunnel

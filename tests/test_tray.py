@@ -466,3 +466,338 @@ def test_wireguard_app_row_offers_hiding_the_tray_icon(qapp):
     d.set_choice("wireguard-app", uninstall=True)        # uninstall unticks hide
     assert not d.hide_tray() and [f.key for f in d.uninstall()] == ["wireguard-app"]
     assert d.ok.text() == "Uninstall 1 and close"
+
+
+# ============================================================ AdGuard for Linux
+class FakeAdGuard:
+    """Stands in for catflap.adguard.AdGuard."""
+
+    def __init__(self, state="on"):
+        from catflap import adguard
+        self.state = state
+        self.calls = []
+        self.host = adguard.Host(flatpak=False)
+        self.fail_start = None
+
+    update = None
+
+    def status(self):
+        from catflap.adguard import CliStatus
+        return CliStatus(self.state, f"status: {self.state}", self.update)
+
+    def argv(self, *args):
+        return ["adguard-cli", *args]
+
+    def path(self, refresh=False):
+        return "/usr/local/bin/adguard-cli"
+
+    def start(self):
+        self.calls.append("start")
+        if self.fail_start:
+            raise self.fail_start
+        self.state = "on"
+
+    def stop(self):
+        self.calls.append("stop")
+        self.state = "off"
+
+
+def test_icon_adguard_shield(qapp):
+    plain = make_icon([]).pixmap(64, 64).toImage()
+    on = make_icon([], adguard="on").pixmap(64, 64).toImage().pixelColor(5, 12)
+    paused = make_icon([], adguard="paused").pixmap(64, 64).toImage().pixelColor(5, 12)
+    off = make_icon([], adguard="off").pixmap(64, 64).toImage().pixelColor(5, 12)
+    assert plain.pixelColor(5, 12).alpha() == 0                     # no shield without AdGuard
+    assert on.green() > 120 and on.red() < 100                      # green shield
+    assert paused.red() > 200 and paused.green() > 120 and paused.blue() < 80   # amber
+    assert off.red() > 200 and off.green() > 200 and off.blue() > 200          # white
+    assert make_icon([], adguard="missing").pixmap(64, 64).toImage() == plain
+    dot = make_icon(["#ff0000"], adguard="on").pixmap(64, 64).toImage().pixelColor(51, 51)
+    assert dot.green() > 150 and dot.red() < 100                    # VPN dot unchanged
+
+
+def _labels(menu):
+    return [a.text() for a in menu.actions()]
+
+
+linux_only = pytest.mark.skipif(__import__("sys").platform == "win32", reason="adguard-cli is Linux only")
+
+
+@linux_only
+def test_tray_adguard_menu_pause_and_auto_resume(qapp, manager, monkeypatch):
+    from catflap import adguard
+    ag = FakeAdGuard("on")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_state == "on")
+    labels = _labels(app.menu)
+    assert "AdGuard Ad Blocking: Protecting" in labels and "Pause AdGuard" in labels
+    assert "AdGuard: Protecting" in app.tray.toolTip()
+    pause_menu = next(a.menu() for a in app.menu.actions() if a.text() == "Pause AdGuard")
+    next(a for a in pause_menu.actions() if a.text() == "For 5 minutes").trigger()
+    wait_for(qapp, lambda: not app.ag_busy)
+    assert ag.calls == ["stop"] and app.ag_state == "paused"
+    assert adguard.PAUSE_KEY in manager.store.settings()
+    assert any(t.startswith("AdGuard Ad Blocking: Paused, 5 min left") for t in _labels(app.menu))
+    assert "Resume AdGuard now" in _labels(app.menu)
+
+    # Time's up: the next poll turns it back on.
+    app.settings[adguard.PAUSE_KEY] = 1.0
+    app.poll_adguard()
+    wait_for(qapp, lambda: ag.calls == ["stop", "start"] and not app.ag_busy)
+    assert app.ag_state == "on" and adguard.PAUSE_KEY not in app.settings
+
+
+@linux_only
+def test_tray_adguard_failed_auto_resume_gives_up(qapp, manager):
+    from catflap import adguard
+    ag = FakeAdGuard("off")
+    ag.fail_start = adguard.NeedsTerminal(["adguard-cli", "start"], "sudo: a terminal is required")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    app.settings[adguard.PAUSE_KEY] = 1.0
+    wait_for(qapp, lambda: not app._ag_polling)
+    app.poll_adguard()
+    wait_for(qapp, lambda: "start" in ag.calls and not app.ag_busy)
+    wait_for(qapp, lambda: app.ag_state == "off")
+    assert adguard.PAUSE_KEY not in app.settings                    # no retry loop
+    assert ag.calls == ["start"]
+
+
+@linux_only
+def test_tray_adguard_toggle_and_hide_shield(qapp, manager):
+    from catflap import adguard
+    ag = FakeAdGuard("off")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_state == "off")
+    toggle = next(a for a in app.menu.actions() if a.text().startswith("AdGuard Ad Blocking"))
+    assert toggle.isCheckable() and not toggle.isChecked()
+    toggle.trigger()
+    wait_for(qapp, lambda: app.ag_state == "on" and not app.ag_busy)
+    app.set_adguard_show(False)
+    assert manager.store.settings()[adguard.SHOW_KEY] is False
+    assert app._tray_icon().pixmap(64, 64).toImage().pixelColor(5, 12).alpha() == 0
+
+
+@linux_only
+def test_tray_without_adguard_has_no_section(qapp, manager):
+    ag = FakeAdGuard("missing")
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: not app._ag_polling)
+    assert not any("AdGuard" in t for t in _labels(app.menu))
+    assert "AdGuard" not in app.tray.toolTip()
+
+
+@linux_only
+def test_tray_adguard_update_notice(qapp, manager, monkeypatch):
+    from catflap import adguard
+    ag = FakeAdGuard("on")
+    ag.update = "1.5.1"
+    opened = []
+    monkeypatch.setattr(adguard, "open_terminal", lambda host, cmd, title="": opened.append(cmd) or True)
+    shown = []
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    monkeypatch.setattr(app.tray, "showMessage", lambda *a, **k: shown.append(a[1]))
+    wait_for(qapp, lambda: not app._ag_polling)
+    app.poll_adguard()
+    wait_for(qapp, lambda: "Update AdGuard to 1.5.1…" in _labels(app.menu))
+    assert app.settings["adguard_update_notified"] == "1.5.1"
+    app.poll_adguard()
+    wait_for(qapp, lambda: not app._ag_polling)
+    assert len([m for m in shown if "1.5.1" in m]) <= 1              # told once per version
+    next(a for a in app.menu.actions() if a.text() == "Update AdGuard to 1.5.1…").trigger()
+    assert opened == ["adguard-cli stop && adguard-cli update ; adguard-cli start"]
+
+
+@linux_only
+def test_tray_adguard_update_stops_and_restarts_adguard(qapp, manager, monkeypatch):
+    from catflap import adguard
+    ag = FakeAdGuard("on")
+    opened = []
+    monkeypatch.setattr(adguard, "open_terminal", lambda host, cmd, title="": opened.append(cmd) or True)
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_state == "on")
+    app.adguard_update()
+    assert opened == ["adguard-cli stop && adguard-cli update ; adguard-cli start"]
+
+
+@linux_only
+def test_flatpak_without_permission_asks_as_soon_as_adguard_is_seen(qapp, manager, monkeypatch):
+    from catflap import adguard, ui_adguard
+    ag = FakeAdGuard("no-access")
+    monkeypatch.setattr(adguard, "detect_from_sandbox", lambda: True)
+    shown = []
+
+    class FakeDialog:
+        def __init__(self, seen, declined, parent=None):
+            shown.append(seen)
+            self.declined, self.restart_now = False, True
+
+        def exec(self):
+            return 1
+    monkeypatch.setattr(ui_adguard, "FlatpakPermissionDialog", FakeDialog)
+    restarted = []
+    monkeypatch.setattr(tray.TrayApp, "restart_app", lambda self, info=None: restarted.append(1))
+    app = tray.TrayApp(qapp, manager, adguard_cli=ag)
+    app.timer.stop()
+    wait_for(qapp, lambda: shown and restarted)
+    assert shown == [True] and app.adguard_needs_permission
+    assert "⚠ Let CatFlap control AdGuard…" in _labels(app.menu)
+    assert "needs permission" in app.tray.toolTip()
+    red = app._tray_icon().pixmap(64, 64).toImage().pixelColor(13, 12)
+    assert red.red() > 180 and red.green() < 100                     # red "!" shield
+    app._ag_detect_at = 0
+    app.poll_adguard()
+    wait_for(qapp, lambda: not app._ag_polling)
+    qapp.processEvents()
+    assert shown == [True]                                           # once per start
+
+
+@linux_only
+def test_flatpak_permission_declined_stays_quiet(qapp, manager, monkeypatch):
+    from catflap import adguard, ui_adguard
+    manager.store.settings()["adguard_flatpak_declined"] = True
+    monkeypatch.setattr(adguard, "detect_from_sandbox", lambda: True)
+    monkeypatch.setattr(ui_adguard, "FlatpakPermissionDialog",
+                        lambda *a, **k: pytest.fail("asked although declined"))
+    app = tray.TrayApp(qapp, manager, adguard_cli=FakeAdGuard("no-access"))
+    app.timer.stop()
+    wait_for(qapp, lambda: app.ag_in_sandbox_seen)
+    assert "⚠ Let CatFlap control AdGuard…" in _labels(app.menu)    # still reachable
+    assert app._tray_icon().pixmap(64, 64).toImage().pixelColor(13, 12).alpha() == 0
+
+
+def test_restarts_when_a_newer_version_is_installed(qapp, manager, monkeypatch):
+    from catflap import update
+    monkeypatch.setattr(tray.TrayApp, "INSTALL_CHECK_MS", 10_000_000)
+    app = tray.TrayApp(qapp, manager, adguard_cli=FakeAdGuard("missing"))
+    app.timer.stop()
+    started, quits = [], []
+    monkeypatch.setattr(update, "restart", lambda info=None: started.append(info))
+    monkeypatch.setattr(app, "quit", lambda force=False: quits.append(force))
+    monkeypatch.setattr(update, "installed_version", lambda info=None: tray.__version__)
+    app.check_installed_version()
+    wait_for(qapp, lambda: not app._install_checking)
+    assert not started                                               # same version: nothing
+    monkeypatch.setattr(update, "installed_version", lambda info=None: "99.0")
+    monkeypatch.setattr(tray.QtCore.QTimer, "singleShot", lambda ms, fn: fn())
+    app.check_installed_version()
+    wait_for(qapp, lambda: started)
+    assert quits == [True] and manager.store.settings()["pending_update"] == "99.0"
+
+
+def test_update_check_is_fresh_and_opens_the_window_once_per_version(qapp, manager, monkeypatch):
+    from catflap import update, ui_update
+    from catflap.update import InstallInfo, ReleaseInfo, UpdateStatus
+    calls, opened, shown = [], [], []
+
+    def fake_check(settings, force=False, **kw):
+        calls.append(force)
+        st = UpdateStatus(current="1.9", install=InstallInfo("rpm"))
+        st.latest = ReleaseInfo(version="2.0", url="u", notes="", assets={})
+        st.available = True
+        return st
+    monkeypatch.setattr(update, "check", fake_check)
+
+    class FakeDialog:
+        restart_requested = False
+
+        def __init__(self, st, parent, settings):
+            opened.append(st.latest.version)
+
+        def exec(self):
+            return 0
+    monkeypatch.setattr(ui_update, "UpdateDialog", FakeDialog)
+    app = tray.TrayApp(qapp, manager, adguard_cli=FakeAdGuard("missing"))
+    app.timer.stop()
+    monkeypatch.setattr(app.tray, "showMessage", lambda *a, **k: shown.append(a[1]))
+    app.check_updates(interactive=False)                       # e.g. at start-up
+    wait_for(qapp, lambda: opened)
+    assert calls == [True] and opened == ["2.0"]               # asked GitHub, not the cache
+    assert manager.store.settings()["update_offered"] == "2.0"
+    app._periodic_update_check()                               # hours later: same version
+    wait_for(qapp, lambda: shown)
+    assert opened == ["2.0"] and "2.0" in shown[0] and calls == [True, True]
+
+
+def test_wizard_ignores_next_while_working(qapp, manager, no_popups):
+    """A second click on Next while a step is still working must not run it again."""
+    import threading
+    from catflap import ui_common
+    w = ui_wizards.SiteWizard(manager)
+    w.show()
+    nxt = w.button(QtWidgets.QWizard.NextButton)
+    release = threading.Event()
+    calls, seen = [], {}
+
+    def slow():
+        calls.append(1)
+        release.wait(5)
+        return "ok"
+
+    def click_again():
+        seen["busy"] = ui_common.is_busy(w)
+        seen["next_enabled"] = nxt.isEnabled()
+        seen["validated"] = w.validateCurrentPage()        # what Next would do
+        nxt.click()                                         # a real second click
+        release.set()
+
+    from PySide6 import QtCore
+    QtCore.QTimer.singleShot(50, click_again)
+    assert ui_common.run_blocking(w.currentPage(), "Working…", slow) == "ok"
+    assert calls == [1]
+    assert seen == {"busy": True, "next_enabled": False, "validated": False}
+    assert nxt.isEnabled() and not ui_common.is_busy(w)    # back to normal afterwards
+
+
+def test_unifi_server_help_suggests_a_free_subnet(qapp, manager):
+    from catflap.model import Network
+    html = ui_wizards.unifi_server_help(manager, [Network("LAN", "10.250.1.0/24")])
+    assert "Alternate Address for Clients" in html and "Manual" in html
+    assert "10.250.2.1" in html                             # 10.250.1.x is the site's LAN
+
+
+def test_file_page_warns_about_a_private_endpoint(qapp, manager, no_popups, unifi_conf, tmp_path,
+                                                  monkeypatch):
+    conf = tmp_path / "home.conf"
+    conf.write_text(unifi_conf.read_text().replace("203.0.113.10:51820", "10.0.1.30:51821"))
+    asked = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "exec", lambda self: asked.append(self.text()) or 0)
+    w = ui_wizards.SiteWizard(manager)
+    w.show()
+    pick(w, "alta")
+    fp = w.currentPage()
+    fp.path.setText(str(conf))
+    w.next()                                                # dialog "closed" without a choice
+    assert asked and "10.0.1.30" in asked[0] and "UDP port 51821" in asked[0]
+    fp.endpoint.setText("home.example.net")
+    w.next()
+    assert w.currentId() == ui_wizards.P_SITE_NETS and w.endpoint == "home.example.net"
+
+
+def test_site_wizard_double_nat_asks_for_the_public_address(qapp, manager, no_popups, monkeypatch):
+    """A UniFi gateway behind another router (e.g. a UDM Pro behind a UCG Fiber) reports a
+    private WAN address; the site must be set up with the front router's public address."""
+    from catflap.model import WanInfo
+    from conftest import FakeDriver
+    monkeypatch.setattr(FakeDriver, "get_wan_info", lambda self, site: WanInfo(wan_ip="10.0.1.30"))
+    w = ui_wizards.SiteWizard(manager)
+    w.gateway = "home-gw"
+    w.setStartId(ui_wizards.P_SITE)
+    w.restart()
+    w.show()
+    w.next()
+    server = w.currentPage()
+    wait_for(qapp, lambda: server.ok)
+    assert not server.public_row.isHidden()
+    assert "10.0.1.30" in server.text.toPlainText()
+    server.public.setText("home.example.net")
+    w.next()
+    w.next()
+    w.next()
+    assert w.currentId() == ui_wizards.P_DONE, no_popups
+    assert w.result.profile.endpoint_host == "home.example.net"

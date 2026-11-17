@@ -78,7 +78,8 @@ def _arch_path(s: float) -> "QtGui.QPainterPath":
 
 
 def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
-                style: str = "site", phase: float = 0.0) -> "QtGui.QPixmap":
+                style: str = "site", phase: float = 0.0,
+                adguard: str | None = None) -> "QtGui.QPixmap":
     """The tray icon: the cat sitting in its tunnel, reaching up.
 
     Disconnected: grey outline. Failed: grey outline with a red dot.
@@ -89,6 +90,10 @@ def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
     * ``"site"``: the site's color; with several sites, a gradient across all of them
     * ``"cycle"``: fades from one site's color to the next (``phase`` 0..n moves it)
     * ``"blue"``: always the blue app icon
+
+    ``adguard`` adds a small shield in the top-left corner for AdGuard's state:
+    ``"on"`` green with a tick, ``"paused"`` amber with a pause mark, ``"off"``
+    white with a grey slash; anything else draws no shield.
     """
     pm = QtGui.QPixmap(size, size)
     pm.fill(Qt.transparent)
@@ -116,8 +121,67 @@ def make_pixmap(colors: list[str], error: bool = False, size: int = 64,
         p.drawPath(_arch_path(s))
         if error:
             _badge(p, s, RED, "")
+    if adguard in SHIELD_STATES:
+        _shield(p, s, adguard)
     p.end()
     return pm
+
+
+AMBER = "#F59E0B"
+SHIELD_STATES = ("on", "paused", "off", "attention")
+
+
+def shield_path(s: float, x: float = 0.0, y: float = 0.0) -> "QtGui.QPainterPath":
+    path = QtGui.QPainterPath()
+    pt = lambda a, b: QtCore.QPointF((a + x) * s, (b + y) * s)  # noqa: E731
+    path.moveTo(pt(13, 2))
+    path.lineTo(pt(24, 6))
+    path.lineTo(pt(24, 13))
+    path.cubicTo(pt(24, 20), pt(19.5, 24.5), pt(13, 27.5))
+    path.cubicTo(pt(6.5, 24.5), pt(2, 20), pt(2, 13))
+    path.lineTo(pt(2, 6))
+    path.closeSubpath()
+    return path
+
+
+def _shield(p: "QtGui.QPainter", s: float, state: str) -> None:
+    """AdGuard status shield, top-left corner (the VPN dot is bottom-right)."""
+    path = shield_path(s)
+    fill = {"on": GREEN, "paused": AMBER, "off": "#F8FAFC", "attention": "#F8FAFC"}[state]
+    ink = {"off": GREY, "attention": RED}.get(state, "white")
+    p.setPen(QtGui.QPen(QtGui.QColor(ink), 2.5 * s, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(QtGui.QColor(fill))
+    p.drawPath(path)
+    mark = QtGui.QPen(QtGui.QColor(ink), 3 * s, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    p.setPen(mark)
+    p.setBrush(Qt.NoBrush)
+    if state == "on":
+        tick = QtGui.QPainterPath()
+        tick.moveTo(8 * s, 14.5 * s)
+        tick.lineTo(11.8 * s, 18.5 * s)
+        tick.lineTo(18.5 * s, 10 * s)
+        p.drawPath(tick)
+    elif state == "paused":
+        p.drawLine(QtCore.QPointF(10 * s, 9.5 * s), QtCore.QPointF(10 * s, 19 * s))
+        p.drawLine(QtCore.QPointF(16 * s, 9.5 * s), QtCore.QPointF(16 * s, 19 * s))
+    elif state == "attention":                     # "!": CatFlap needs something from you
+        p.drawLine(QtCore.QPointF(13 * s, 8 * s), QtCore.QPointF(13 * s, 16.5 * s))
+        p.drawPoint(QtCore.QPointF(13 * s, 21 * s))
+    else:
+        p.drawLine(QtCore.QPointF(7 * s, 21 * s), QtCore.QPointF(19 * s, 8 * s))
+
+
+def shield_icon(state: str, size: int = 32) -> "QtGui.QIcon":
+    """The shield alone, for menu items."""
+    pm = QtGui.QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    if state in SHIELD_STATES:
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.translate(size * 3 / 64, size * 2 / 64)
+        _shield(p, size / 30.0, state)
+        p.end()
+    return QtGui.QIcon(pm)
 
 
 def _mix(a: "QtGui.QColor", b: "QtGui.QColor", t: float) -> "QtGui.QColor":
@@ -185,8 +249,8 @@ def app_icon() -> "QtGui.QIcon":
 
 
 def make_icon(colors: list[str], error: bool = False, size: int = 64,
-              style: str = "site", phase: float = 0.0) -> "QtGui.QIcon":
-    return QtGui.QIcon(make_pixmap(colors, error, size, style, phase))
+              style: str = "site", phase: float = 0.0, adguard: str | None = None) -> "QtGui.QIcon":
+    return QtGui.QIcon(make_pixmap(colors, error, size, style, phase, adguard))
 
 
 def dot_pixmap(color: str, filled: bool, size: int = 16) -> "QtGui.QPixmap":
@@ -244,9 +308,79 @@ def run_bg(fn: Callable[[], Any], cb: Callable[[Any, Any], None]) -> None:
     QtCore.QThreadPool.globalInstance().start(job)
 
 
+if QtCore is not None:
+    _INPUT_EVENTS = {QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                     QtCore.QEvent.MouseButtonDblClick, QtCore.QEvent.KeyPress,
+                     QtCore.QEvent.KeyRelease, QtCore.QEvent.Shortcut,
+                     QtCore.QEvent.ShortcutOverride, QtCore.QEvent.Wheel}
+
+    class _InputBlocker(QtCore.QObject):
+        """Swallows clicks and keys aimed at one window while it is busy, so a second
+        click on Next (or Enter) can't start the same action again."""
+
+        def __init__(self, window):
+            super().__init__()
+            self.window = window
+
+        def eventFilter(self, obj, ev) -> bool:  # noqa: N802 (Qt API)
+            if ev.type() in _INPUT_EVENTS and isinstance(obj, QtWidgets.QWidget):
+                return obj.window() is self.window
+            return False
+
+_BUSY_WINDOWS: dict = {}     # window -> how many run_blocking calls are running for it
+
+_WIZARD_BUTTONS = ("BackButton", "NextButton", "CommitButton", "FinishButton", "CancelButton")
+
+
+def _busy(window, on: bool, saved: dict | None = None) -> dict:
+    """Grey out a wizard's buttons while it's busy (and restore them after)."""
+    saved = saved if saved is not None else {}
+    if not isinstance(window, QtWidgets.QWizard):
+        return saved
+    for which in _WIZARD_BUTTONS:
+        btn = window.button(getattr(QtWidgets.QWizard, which))
+        if btn is None:
+            continue
+        if on:
+            saved[which] = btn.isEnabled()
+            btn.setEnabled(False)
+        elif which in saved:
+            btn.setEnabled(saved[which])
+    return saved
+
+
+def is_busy(widget) -> bool:
+    """True while ``run_blocking`` is working for the window ``widget`` is in."""
+    return widget is not None and widget.window() in _BUSY_WINDOWS
+
+
 def run_blocking(parent, text: str, fn: Callable[[], Any]) -> Any:
     """Run ``fn`` in the background behind a "please wait" dialog; return its
-    result or raise its exception. The UI keeps repainting meanwhile."""
+    result or raise its exception. The UI keeps repainting meanwhile, but the
+    window can't be clicked or typed into until ``fn`` finishes (its wizard
+    buttons are greyed out), so an action can't be started twice."""
+    window = parent.window() if parent is not None else None
+    blocker = None
+    saved: dict = {}
+    if window is not None:
+        _BUSY_WINDOWS[window] = _BUSY_WINDOWS.get(window, 0) + 1
+        blocker = _InputBlocker(window)
+        QtWidgets.QApplication.instance().installEventFilter(blocker)
+        saved = _busy(window, True)
+    try:
+        return _run_blocking(parent, text, fn)
+    finally:
+        if window is not None:
+            QtWidgets.QApplication.instance().removeEventFilter(blocker)
+            _busy(window, False, saved)
+            left = _BUSY_WINDOWS.get(window, 1) - 1
+            if left > 0:
+                _BUSY_WINDOWS[window] = left
+            else:
+                _BUSY_WINDOWS.pop(window, None)
+
+
+def _run_blocking(parent, text: str, fn: Callable[[], Any]) -> Any:
     dlg = QtWidgets.QProgressDialog(text, None, 0, 0, parent)
     dlg.setWindowTitle("CatFlap")
     dlg.setWindowModality(Qt.WindowModal)

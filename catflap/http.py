@@ -28,6 +28,33 @@ class TlsPinError(RuntimeError):
     pass
 
 
+def adguard_message(host: str) -> str:
+    """Why a gateway connection fails while AdGuard's HTTPS filtering re-signs it."""
+    import sys
+    how = ("In AdGuard, turn off HTTPS filtering for CatFlap (catflap.exe), or add "
+           f"{host} to its HTTPS filtering exclusions."
+           if sys.platform == "win32" else
+           "Exclude CatFlap from HTTPS filtering: CatFlap's AdGuard menu → Check HTTPS "
+           "filtering…, or run: catflap adguard exclude 'python3*'")
+    return (f"AdGuard's HTTPS filtering is intercepting the connection to {host}, so CatFlap "
+            f"can't check that it's really your gateway and won't send your API key. {how}")
+
+
+def _adguard_der(host: str, port: int, timeout: float) -> bytes | None:
+    """The certificate we're shown for host:port, if AdGuard issued it."""
+    from .adguard import intercepted_by_adguard
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s, \
+                ctx.wrap_socket(s, server_hostname=host) as ts:
+            der = ts.getpeercert(binary_form=True)
+    except OSError:
+        return None
+    return der if intercepted_by_adguard(der) else None
+
+
 def _norm_fp(fp: str) -> str:
     return fp.replace(":", "").strip().lower()
 
@@ -41,6 +68,10 @@ def fetch_fingerprint(base_url: str, timeout: float = 10) -> str:
     with socket.create_connection((u.hostname, u.port or 443), timeout=timeout) as s:
         with ctx.wrap_socket(s, server_hostname=u.hostname) as ts:
             der = ts.getpeercert(binary_form=True)
+    from .adguard import intercepted_by_adguard
+    if intercepted_by_adguard(der):
+        # Never pin AdGuard's stand-in certificate as the gateway's.
+        raise TlsPinError(adguard_message(u.hostname or ""))
     return ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
 
 
@@ -75,11 +106,19 @@ class JsonClient:
         else:
             conn = http.client.HTTPConnection(u.hostname, u.port or 80, timeout=self.timeout)
         try:
-            conn.connect()
+            try:
+                conn.connect()
+            except ssl.SSLCertVerificationError:
+                if _adguard_der(u.hostname or "", u.port or 443, self.timeout):
+                    raise TlsPinError(adguard_message(u.hostname or "")) from None
+                raise
             if self.fingerprint and isinstance(conn, http.client.HTTPSConnection):
                 der = conn.sock.getpeercert(binary_form=True)  # type: ignore[union-attr]
                 got = hashlib.sha256(der).hexdigest()
                 if got != _norm_fp(self.fingerprint):
+                    from .adguard import intercepted_by_adguard
+                    if intercepted_by_adguard(der):
+                        raise TlsPinError(adguard_message(u.hostname or ""))
                     raise TlsPinError(
                         "gateway TLS certificate changed (fingerprint mismatch). If you replaced "
                         "the certificate, re-run 'catflap gateway add --tofu' to re-pin it.")

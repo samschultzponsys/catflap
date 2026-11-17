@@ -3,6 +3,95 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.1
+
+- **Next can't be clicked twice.** While a wizard step is working (creating the site,
+  signing in, looking up consoles), its buttons are greyed out and clicks and keys are
+  ignored. A quick second click on Next used to start the same step again: it created the
+  site, then showed an error from the second attempt.
+- **Routers behind another router (double NAT).** For example a UDM Pro plugged in behind a
+  UCG Fiber. When the site's address is a private one (10.x, 192.168.x, 172.16–31.x),
+  CatFlap now says so and what to do, everywhere it matters: the wizard asks for the front
+  router's public IP or DDNS name (when UniFi reports a private WAN address, and when a
+  WireGuard file points at one), the pre-connect check warns, and a failed connection
+  says "forward UDP port 51821 to 10.0.1.30" with the site's real port and address
+  instead of a generic list of causes (which also always said 51820).
+- **UniFi server instructions match today's UniFi.** The "create a VPN server" steps follow
+  the current *New VPN Server* window: keep the detected Server Address and port, what the
+  *behind NAT* warning means, *Alternate Address for Clients*, and the VPN range under
+  **Advanced → Manual**. CatFlap suggests a VPN range (10.250.N.1/24) that none of your
+  other sites, their networks or this site's networks use, and lists the ones in use. It
+  also warns when a server shares its VPN range (often UniFi's automatic 192.168.3.x) with
+  another site.
+
+## 2.0
+
+- **Update checks you can't miss.** Every time CatFlap starts it asks GitHub for the newest
+  release (it used to reuse the previous day's answer, so a new release could go unseen
+  for up to a day), and it checks again every 6 hours while it runs. The first time
+  it sees a new version, it opens the update window; after that, a notification and the
+  tray menu's **Update to X…** item remind you. Same on Windows and Linux.
+
+## 1.9
+
+- **Flatpak: CatFlap asks for AdGuard permission as soon as it sees AdGuard.** The sandbox
+  can't see `adguard-cli` until it's allowed, so CatFlap now spots AdGuard from inside
+  the sandbox (its proxy answers on this computer, or it re-signs HTTPS) and immediately
+  shows the one command to run, with **Copy** and **I've run it: Restart CatFlap**. It
+  asks again at every start until it's allowed (or you tick *Don't ask again*), the tray
+  icon shows a red **!** shield, and the tray menu has **⚠ Let CatFlap control AdGuard…**.
+- **CatFlap restarts itself after an update.** It checks every minute whether a newer
+  CatFlap was installed (from the update window, a terminal, Discover or dnf) and
+  restarts into it. Restarting always ends the old copy, and the new one waits a moment
+  so its tray icon appears reliably (inside the Flatpak both copies otherwise claim the
+  same tray icon).
+- **Update AdGuard** works while AdGuard is running: AdGuard refuses to update while its
+  proxy runs, so CatFlap stops it, updates, and starts it again in the same terminal.
+- **HTTPS check:** recognizes AdGuard's default of filtering HTTPS only in browsers, and
+  says so instead of "CatFlap's own test connection wasn't filtered". Non-browser apps
+  with their own certificate store (Steam, Discord, Slack, Spotify, Thunderbird) are
+  shown as information, not problems, since AdGuard doesn't filter them by default.
+  "Add to this browser" on items that are already fine is now **Add anyway**.
+- The tray menu and Settings say **AdGuard Ad Blocking**.
+
+## 1.8
+
+- **AdGuard for Linux in the tray.** If AdGuard's command-line app (`adguard-cli`) is
+  installed, the tray menu gets an AdGuard section: an **AdGuard ad blocking** checkbox
+  (on/off), **Pause AdGuard** for 5 minutes, 30 minutes, 1 hour or until you resume
+  (CatFlap turns it back on when the time is up), **Resume AdGuard now**, and an
+  **AdGuard** submenu (filter lists, updates, browser extension, setup).
+- **AdGuard status on the tray icon:** a small shield in the top-left corner: green with
+  a tick while protecting, amber with a pause mark while paused, white with a slash when
+  off. It never covers the VPN dot (bottom-right). **Settings → AdGuard ad blocker → Show
+  AdGuard's status on the tray icon** turns it off. The tooltip says the same in words.
+- **Check HTTPS filtering…** (tray → AdGuard, or Settings → AdGuard ad blocker): finds
+  everything that has to trust AdGuard's certificate for HTTPS filtering to work: the
+  system certificates, each Firefox-family profile (including Flatpak browsers) and the
+  Chrome-family store. Anything that isn't right gets a **Fix** button: trust the
+  certificate system-wide (asks for your password), add it to a browser (needs
+  `certutil`), or exclude an app from HTTPS filtering.
+- **Exclude an app from HTTPS filtering…:** adds the app to AdGuard's `proxy.yaml`
+  (`bypass_https`, or `bypass` to skip filtering it entirely), keeps a backup and
+  restarts AdGuard. For apps that pin their certificates (banking, some games and chat
+  apps, developer tools).
+- **Gateways and AdGuard's HTTPS filtering:** when AdGuard (Linux or Windows) re-signs
+  the connection to your gateway, CatFlap now says exactly that and how to exclude it,
+  instead of *gateway TLS certificate changed*. Adding a gateway never pins AdGuard's
+  stand-in certificate by mistake.
+- **AdGuard updates:** when `adguard-cli` says a newer version is available, the tray menu
+  shows **Update AdGuard to X…** (runs `adguard-cli update` in a terminal) and CatFlap
+  notifies you once per version. The AdGuard submenu also has *License information*,
+  *Set up the HTTPS filtering certificate…* (`cert`) and *Start AdGuard when the computer
+  starts…* (`install-service`). Status is read from AdGuard CLI 1.5's actual output.
+- **New command:** `catflap adguard [status|on|off|pause [MIN]|resume|https-check|exclude APP]`.
+- **Other software list:** AdGuard Ad Blocker (Windows) and AdGuard for Linux are listed
+  as *works alongside CatFlap*, with no uninstall box and no popup. AdGuard VPN is listed
+  as a full-tunnel VPN like the others.
+- Flatpak: controlling AdGuard needs one extra permission, which the Flatpak doesn't
+  have by default; CatFlap shows the one-line command (Settings → AdGuard ad blocker).
+- RPM: recommends `nss-tools` (for adding AdGuard's certificate to browsers).
+
 ## 1.7
 
 - Windows: the WireGuard app is always listed under other VPN software, even before

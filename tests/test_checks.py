@@ -117,3 +117,28 @@ def test_health_ok(backend):
     backend.installed["home"] = SimpleNamespace(allowed_ips=["10.250.1.1/32"])
     f = checks.health(prof(), backend, wait=0, sleep=lambda s: None)
     assert {"handshake", "ping"} <= codes(f)
+
+
+def test_private_endpoint_is_flagged_as_double_nat():  # UniFi gateway behind another router
+    f = checks.preflight(prof(endpoint_host="10.0.1.30", endpoint_port=51821), LocalNetwork(), {})
+    found = next(x for x in f if x.code == "endpoint-private")
+    assert "10.0.1.30" in found.message and "51821" in found.message
+    assert "endpoint-raw-ip" not in codes(f)
+
+
+def test_no_handshake_explains_double_nat(backend):
+    p = prof(endpoint_host="10.0.1.30", endpoint_port=51821)
+    backend.active.add("home")
+    backend.rx = 0
+    backend.ping_ok = False
+    msg = checks.health(p, backend, wait=0, sleep=lambda s: None)[0].message
+    assert "private address" in msg and "forward UDP port 51821 to 10.0.1.30" in msg
+    assert "51820" not in msg and "(10)" not in msg
+
+
+def test_no_handshake_uses_the_real_port(backend):
+    backend.active.add("home")
+    backend.rx = 0
+    backend.ping_ok = False
+    msg = checks.health(prof(endpoint_port=51821), backend, wait=0, sleep=lambda s: None)[0].message
+    assert "UDP port 51821" in msg and "home.example.net" in msg
