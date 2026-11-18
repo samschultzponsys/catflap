@@ -3,6 +3,12 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.3
+
+- **Check for updates from the tray.** Right-click the tray icon → *Check for updates…*
+  (it becomes *Update to X.Y…* once a new version is known). A check you start yourself
+  now says so if it can't reach GitHub, instead of doing nothing.
+
 ## 2.2
 
 - **Connecting no longer fails with "the router didn't answer in time".** That message was

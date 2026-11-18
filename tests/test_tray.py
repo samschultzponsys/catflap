@@ -71,6 +71,7 @@ def test_tray_menu_and_basic_window(qapp, manager, backend):
     labels = [a.text() for a in app.menu.actions()]
     assert "Home Sweet Home: Not connected  (Connect)" in labels
     assert "Add a site…" in labels and "Open CatFlap" in labels and "Quit" in labels
+    assert "Check for updates…" in labels
     backend.active.add("home")
     app.status = manager.status()
     app._render()
@@ -833,3 +834,13 @@ def test_second_copy_shows_the_first_one_and_exits(qapp, manager, tmp_path, monk
     assert tray.ask_running_instance(name, b"ping", timeout_ms=200) is False
     assert tray.claim_single_instance(second, name) is True
     second.instance_server.close()
+
+
+def test_tray_check_for_updates_says_when_it_fails(qapp, manager, no_popups):
+    app = tray.TrayApp(qapp, manager)
+    app.timer.stop()
+    app._update_checked(None, OSError("network is unreachable"), interactive=True)
+    assert no_popups and no_popups[-1][0] == "warning" and "Couldn't check for updates" in no_popups[-1][1]
+    shown = len(no_popups)
+    app._update_checked(None, OSError("x"), interactive=False)   # background checks stay quiet
+    assert len(no_popups) == shown

@@ -561,6 +561,8 @@ class TrayApp(QtCore.QObject if QtCore else object):
         if self.update_status and self.update_status.available:
             m.addAction(f"Update to {self.update_status.latest.version}…",
                         lambda: self.check_updates(interactive=True))
+        else:
+            m.addAction("Check for updates…", lambda: self.check_updates(interactive=True))
         m.addSeparator()
         m.addAction("Quit", self.quit)
 
@@ -1010,6 +1012,11 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self.update_status = st
         self._build_menu()
         if err or st is None:
+            if interactive:
+                QtWidgets.QMessageBox.warning(
+                    self.window, "CatFlap",
+                    "Couldn't check for updates: " + (friendly_error(err) if err else "no answer")
+                    + "\n\nCheck your internet connection and try again.")
             return
         if not st.available:
             if interactive:
