@@ -61,6 +61,13 @@ class NetworkManagerBackend(Backend):
         if res.returncode == 127:
             raise BackendError("nmcli not found: install NetworkManager "
                                "(Fedora: dnf install NetworkManager; Debian: apt install network-manager)")
+        if check and res.returncode == 124:
+            raise BackendError(
+                f"NetworkManager on this computer didn't reply in time (nmcli {' '.join(args[:2])}). "
+                "This is a problem on this computer, not at the site or its router. To fix it: "
+                "1) click Connect again; 2) if it fails again, Quit CatFlap from the tray and "
+                "start it again; 3) if it still fails, restart NetworkManager (in a terminal: "
+                "sudo systemctl restart NetworkManager) or sign out and back in.")
         if check and res.returncode != 0:
             msg = (res.stderr or res.stdout).strip()
             if "not authorized" in msg.lower() or "insufficient privileges" in msg.lower():

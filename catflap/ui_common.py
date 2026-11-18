@@ -410,6 +410,10 @@ def friendly_error(e: BaseException, address: str = "") -> str:
         return (f"The router{where} answered, but its security certificate couldn't be "
                 "checked. Make sure the address starts with https:// and is your router.")
     if isinstance(e, (socket.timeout, TimeoutError)):
+        if not address:
+            # No router involved that we know of: don't send people checking the wrong thing.
+            return ("Something CatFlap was waiting for didn't answer in time. Try again; if it "
+                    "keeps happening, Quit CatFlap from the tray and start it again.")
         return (f"The router{where} didn't answer in time. Check the address, and that this "
                 "computer is on the same network as the router.")
     if isinstance(e, ConnectionRefusedError):

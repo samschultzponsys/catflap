@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Any
 
 from . import adguard, autostart, checks, update
@@ -402,6 +403,7 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self._ag_asked = False
         self.settings = self.m.store.settings()
         self.quitting = False
+        self.instance_server = None         # see claim_single_instance()
         self.paused = 0
         self.profiles: dict[str, Profile] = self.m.store.profiles()
         self.status: dict[str, Any] = {}
@@ -1108,6 +1110,10 @@ class TrayApp(QtCore.QObject if QtCore else object):
         """Quit. ``force``: also end the process within a few seconds even if something
         (a stuck background job) would keep it alive, so a restart never leaves two."""
         self.quitting = True
+        if self.instance_server is not None:
+            # Let a CatFlap started right after this (a restart) take over at once.
+            self.instance_server.close()
+            self.instance_server = None
         self.tray.hide()
         if force and not os.environ.get("CATFLAP_NO_FORCE_EXIT"):
             import threading
@@ -1115,6 +1121,75 @@ class TrayApp(QtCore.QObject if QtCore else object):
             t.daemon = True
             t.start()
         self.qapp.quit()
+
+
+# ============================================================ one CatFlap at a time
+# Starting CatFlap while it's already running (from the app menu, at login, or a
+# restart racing the old copy) used to give two tray icons. Now the first copy
+# listens on a local socket; a later one asks it to show its window and exits.
+RESTART_FLAG = update.AFTER_RESTART  # started by a restart: wait for the old copy to go
+
+
+def instance_socket_name() -> str:
+    if sys.platform == "win32":
+        import getpass
+        return f"catflap-tray-{getpass.getuser()}"
+    run = os.environ.get("XDG_RUNTIME_DIR", "")
+    app_dir = os.path.join(run, "app", os.environ.get("FLATPAK_ID", ""))
+    path = ""
+    if run and os.environ.get("FLATPAK_ID") and os.path.isdir(app_dir):
+        path = os.path.join(app_dir, "tray.sock")   # shared by every copy of the Flatpak
+    elif run and os.path.isdir(run):
+        path = os.path.join(run, "catflap-tray.sock")
+    if path and len(path.encode()) < 100:           # Unix sockets: paths up to ~107 bytes
+        return path
+    return f"catflap-tray-{os.getuid()}"
+
+
+def ask_running_instance(name: str, message: bytes, timeout_ms: int = 1500) -> bool:
+    """Send ``message`` to the CatFlap already running; False if there is none."""
+    from PySide6 import QtNetwork
+    sock = QtNetwork.QLocalSocket()
+    sock.connectToServer(name)
+    if not sock.waitForConnected(timeout_ms):
+        return False
+    sock.write(message + b"\n")
+    sock.flush()
+    sock.waitForBytesWritten(timeout_ms)
+    sock.waitForReadyRead(timeout_ms)       # its "ok", so we know it got the message
+    sock.disconnectFromServer()
+    return True
+
+
+def claim_single_instance(app: "TrayApp", name: str) -> bool:
+    """Become the CatFlap that later starts talk to. False if another one holds the name."""
+    from PySide6 import QtNetwork
+    if ask_running_instance(name, b"ping"):
+        return False
+    # No socket options: with them Qt binds elsewhere and renames over the path, which
+    # would silently replace a running copy's socket. The runtime dir is private anyway.
+    server = QtNetwork.QLocalServer(app)
+    if not server.listen(name):
+        QtNetwork.QLocalServer.removeServer(name)    # left behind by a copy that crashed
+        if not server.listen(name):
+            print(f"catflap: can't watch for a second copy ({server.errorString()})", file=sys.stderr)
+            return True
+
+    def on_connection():
+        while server.hasPendingConnections():
+            conn = server.nextPendingConnection()
+
+            def read(c=conn):
+                data = bytes(c.readAll()).strip()
+                c.write(b"ok\n")
+                c.flush()
+                c.disconnectFromServer()
+                if data == b"show" and not app.quitting:
+                    app.show_window()
+            conn.readyRead.connect(read)
+    server.newConnection.connect(on_connection)
+    app.instance_server = server
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1128,7 +1203,18 @@ def main(argv: list[str] | None = None) -> int:
     qapp.setWindowIcon(app_icon())
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
         print("catflap: no system tray available; showing the window only", file=sys.stderr)
+    name = instance_socket_name()
+    deadline = time.monotonic() + (15 if RESTART_FLAG in argv else 0)
+    while True:
+        # Already running? Bring its window up (unless this is the quiet start at login).
+        quiet = "--minimized" in argv or RESTART_FLAG in argv
+        if not ask_running_instance(name, b"ping" if quiet else b"show"):
+            break
+        if time.monotonic() >= deadline:
+            return 0
+        time.sleep(0.5)     # a restart: the old copy is still quitting
     app = TrayApp(qapp)
+    claim_single_instance(app, name)
     # Quit cleanly on logout/SIGTERM/Ctrl+C: Python only handles signals while
     # it runs, so wake the interpreter regularly.
     import signal

@@ -225,6 +225,7 @@ def flatpak_commands(st: UpdateStatus, bundle: Path | None = None) -> list[str]:
     return cmds + [f"flatpak install --user -y {path}"]
 
 
+AFTER_RESTART = "--after-restart"   # tells the new copy to wait for the old one to quit
 RESTART_DELAY = 2          # seconds the new instance waits for the old one to be gone
 
 
@@ -240,12 +241,12 @@ def restart_command(info: InstallInfo | None = None, delay: float = 0) -> list[s
         # in a new sandbox; no extra permissions needed.
         if delay:
             return ["flatpak-spawn", "--latest-version", "sh", "-c",
-                    f"sleep {delay:g}; exec catflap-tray"]
-        return ["flatpak-spawn", "--latest-version", "catflap-tray"]
+                    f"sleep {delay:g}; exec catflap-tray {AFTER_RESTART}"]
+        return ["flatpak-spawn", "--latest-version", "catflap-tray", AFTER_RESTART]
     if info.method == "windows":
-        return [sys.executable, "tray"]
+        return [sys.executable, "tray", AFTER_RESTART]
     exe = shutil.which("catflap-tray")
-    cmd = [exe] if exe else [sys.executable, "-m", "catflap", "tray"]
+    cmd = ([exe] if exe else [sys.executable, "-m", "catflap", "tray"]) + [AFTER_RESTART]
     if delay:
         import shlex
         return ["sh", "-c", f"sleep {delay:g}; exec " + " ".join(shlex.quote(c) for c in cmd)]

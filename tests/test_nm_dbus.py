@@ -162,3 +162,84 @@ def test_backend_selection(monkeypatch):
     assert base.get_backend().name == "networkmanager-dbus"
     monkeypatch.setenv("CATFLAP_BACKEND", "nmcli")
     assert base.get_backend().name == "networkmanager"
+
+
+class _SharedSocketConn:
+    """Mimics jeepney's blocking connection: replies arrive on one shared stream and a
+    reader that gets someone else's reply drops it (that's what jeepney does)."""
+
+    def __init__(self, hang=False):
+        import threading
+        self.inbox = []
+        self.cv = threading.Condition()
+        self.hang = hang
+        self.closed = False
+        self.serial = 0
+
+    def send_and_get_reply(self, msg, timeout=None):
+        import time
+        with self.cv:
+            self.serial += 1
+            mine = self.serial
+        if self.hang:
+            raise TimeoutError
+        import random
+        time.sleep(random.uniform(0, 0.02))   # replies come back in any order
+        with self.cv:
+            self.inbox.append(mine)
+            self.cv.notify_all()
+        time.sleep(0.005)                       # another reader may get there first
+        deadline = time.monotonic() + 0.5
+        with self.cv:
+            while True:
+                if self.inbox:
+                    got = self.inbox.pop()     # whoever reads next gets the newest
+                    if got == mine:
+                        return ("reply", mine)
+                    continue          # someone else's reply: dropped
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError
+                self.cv.wait(left)
+
+    def close(self):
+        self.closed = True
+
+
+def _bus_with(monkeypatch, conns):
+    jeepney = pytest.importorskip("jeepney")  # noqa: F841
+    from jeepney.io import blocking
+    monkeypatch.setattr(blocking, "open_dbus_connection", lambda bus: conns.pop(0))
+    monkeypatch.setattr("jeepney.wrappers.unwrap_msg", lambda m: m)
+    return nm_dbus.JeepneyBus()
+
+
+def test_jeepney_bus_calls_from_several_threads_dont_steal_replies(monkeypatch):
+    """The tray polls status while a site connects: every call must get its own reply."""
+    import threading
+    bus = _bus_with(monkeypatch, [_SharedSocketConn()])
+    errors = []
+
+    def worker():
+        try:
+            for _ in range(5):
+                bus.call("/x", "org.x.I", "Get")
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+
+
+def test_jeepney_bus_timeout_says_what_to_do_and_reconnects(monkeypatch):
+    stuck, fresh = _SharedSocketConn(hang=True), _SharedSocketConn()
+    bus = _bus_with(monkeypatch, [stuck, fresh])
+    with pytest.raises(BackendError) as e:
+        bus.call("/x", "org.x.I", "ActivateConnection")
+    msg = str(e.value)
+    assert "not at the site or its router" in msg and "Quit CatFlap" in msg
+    assert stuck.closed and bus._conn is fresh
+    assert bus.call("/x", "org.x.I", "Get")[0] == "reply"

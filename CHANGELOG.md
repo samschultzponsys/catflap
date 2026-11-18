@@ -3,6 +3,21 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.2
+
+- **Connecting no longer fails with "the router didn't answer in time".** That message was
+  wrong: nothing was waiting on a router. CatFlap talks to NetworkManager over one D-Bus
+  connection, and when the tray's status check ran while a site was connecting (or two sites
+  at once), one could take the other's reply, so the connect waited 30 seconds and gave up.
+  Restarting CatFlap fixed it until the next time. Calls are now taken one at a time, a stuck
+  connection is reopened instead of breaking later calls, and if NetworkManager really doesn't
+  reply, CatFlap says it's a problem on this computer and what to do: try again, restart
+  CatFlap, or restart NetworkManager.
+- **Only one CatFlap at a time.** Starting CatFlap while it's already running (from the app
+  menu, at login, or an update restart that raced the old copy) gave a second tray icon that
+  then had to be quit separately. Now the running CatFlap just opens its window, and an
+  update restart waits for the old copy to finish quitting.
+
 ## 2.1
 
 - **Next can't be clicked twice.** While a wizard step is working (creating the site,

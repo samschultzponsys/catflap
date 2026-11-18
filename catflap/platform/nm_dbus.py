@@ -42,19 +42,50 @@ class Bus(Protocol):
     def get(self, path: str, interface: str, prop: str) -> Any: ...
 
 
+CALL_TIMEOUT = 30   # seconds to wait for NetworkManager to reply
+
+
+def nm_timeout_text(method: str) -> str:
+    """What to do when NetworkManager (on this computer) doesn't reply."""
+    return (f"NetworkManager on this computer didn't reply within {CALL_TIMEOUT} seconds "
+            f"({method}). This is a problem on this computer, not at the site or its router. "
+            "To fix it: 1) click Connect again; 2) if it fails again, Quit CatFlap from the "
+            "tray and start it again; 3) if it still fails, restart NetworkManager "
+            "(in a terminal: sudo systemctl restart NetworkManager) or sign out and back in.")
+
+
 class JeepneyBus:
-    """Minimal blocking system-bus client for NetworkManager."""
+    """Minimal blocking system-bus client for NetworkManager.
+
+    jeepney's blocking connection is not thread-safe: when two threads wait for
+    replies at once (the tray polls status while a site connects), one thread
+    reads the other's reply and drops it, and that call then hangs until it
+    times out. So calls are serialized with a lock, and after a timeout the
+    connection is reopened, so one stuck reply can't poison later calls."""
 
     def __init__(self) -> None:
+        import threading
         try:
             from jeepney.io.blocking import open_dbus_connection
         except ImportError:
             raise BackendError("the D-Bus backend needs the 'jeepney' package "
                                "(Fedora: python3-jeepney)") from None
+        self._open = open_dbus_connection
+        self._lock = threading.Lock()
+        self._conn = self._connect()
+
+    def _connect(self):
         try:
-            self._conn = open_dbus_connection(bus="SYSTEM")
+            return self._open(bus="SYSTEM")
         except OSError as e:
             raise BackendError(f"cannot reach the system D-Bus: {e}") from e
+
+    def _reconnect(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:  # noqa: BLE001 - it's being replaced anyway
+            pass
+        self._conn = self._connect()
 
     def call(self, path, interface, method, signature="", args=()):
         from jeepney import DBusAddress, new_method_call
@@ -62,7 +93,19 @@ class JeepneyBus:
         addr = DBusAddress(path, bus_name=NM, interface=interface)
         msg = new_method_call(addr, method, signature or None, tuple(args))
         try:
-            return unwrap_msg(self._conn.send_and_get_reply(msg, timeout=30))
+            with self._lock:
+                try:
+                    reply = self._conn.send_and_get_reply(msg, timeout=CALL_TIMEOUT)
+                except TimeoutError:
+                    self._reconnect()
+                    raise BackendError(nm_timeout_text(method)) from None
+                except (OSError, ValueError):
+                    # Broken connection (e.g. NetworkManager restarted): reconnect, retry once.
+                    self._reconnect()
+                    reply = self._conn.send_and_get_reply(msg, timeout=CALL_TIMEOUT)
+            return unwrap_msg(reply)
+        except TimeoutError:
+            raise BackendError(nm_timeout_text(method)) from None
         except DBusErrorResponse as e:
             text = " ".join(str(x) for x in (e.data or ()))
             if "PermissionDenied" in e.name or "NotAuthorized" in text:

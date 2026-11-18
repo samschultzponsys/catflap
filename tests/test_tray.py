@@ -801,3 +801,35 @@ def test_site_wizard_double_nat_asks_for_the_public_address(qapp, manager, no_po
     w.next()
     assert w.currentId() == ui_wizards.P_DONE, no_popups
     assert w.result.profile.endpoint_host == "home.example.net"
+
+
+def test_friendly_timeout_blames_the_router_only_when_one_is_involved():
+    from catflap.ui_common import friendly_error
+    assert "router" not in friendly_error(TimeoutError()).lower()
+    assert "router at 10.0.0.1" in friendly_error(TimeoutError(), "10.0.0.1")
+
+
+def test_second_copy_shows_the_first_one_and_exits(qapp, manager, tmp_path, monkeypatch):
+    """Starting CatFlap while it runs must not add a second tray icon."""
+    import threading
+    name = str(tmp_path / "tray.sock")
+    first = tray.TrayApp(qapp, manager)
+    shown = []
+    monkeypatch.setattr(first, "show_window", lambda: shown.append(1))
+    assert tray.claim_single_instance(first, name)
+
+    answered = {}
+    t = threading.Thread(target=lambda: answered.setdefault("show", tray.ask_running_instance(name, b"show")))
+    t.start()
+    wait_for(qapp, lambda: not t.is_alive() and shown)
+    assert answered["show"] is True
+
+    # Another copy can't claim it while the first runs...
+    second = tray.TrayApp(qapp, manager)
+    assert tray.claim_single_instance(second, name) is False
+    # ...but can once the first has quit (a restart), and nothing answers then.
+    monkeypatch.setattr(first.qapp, "quit", lambda: None)
+    first.quit()
+    assert tray.ask_running_instance(name, b"ping", timeout_ms=200) is False
+    assert tray.claim_single_instance(second, name) is True
+    second.instance_server.close()

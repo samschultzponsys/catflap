@@ -86,14 +86,16 @@ def test_flatpak_update_downloads_bundle_and_explains(monkeypatch, tmp_path):
 
 
 def test_restart_command_runs_latest_version(monkeypatch):
-    assert update.restart_command(InstallInfo("flatpak")) == ["flatpak-spawn", "--latest-version", "catflap-tray"]
+    # --after-restart: the new copy waits for the old one to quit instead of deferring to it.
+    assert update.restart_command(InstallInfo("flatpak")) == [
+        "flatpak-spawn", "--latest-version", "catflap-tray", "--after-restart"]
     # With a delay the new instance waits for the old one to release its tray icon.
     assert update.restart_command(InstallInfo("flatpak"), delay=2) == [
-        "flatpak-spawn", "--latest-version", "sh", "-c", "sleep 2; exec catflap-tray"]
+        "flatpak-spawn", "--latest-version", "sh", "-c", "sleep 2; exec catflap-tray --after-restart"]
     monkeypatch.setattr(update.shutil, "which", lambda n: None)
-    assert update.restart_command(InstallInfo("pip"))[-2:] == ["catflap", "tray"]
+    assert update.restart_command(InstallInfo("pip"))[-3:] == ["catflap", "tray", "--after-restart"]
     monkeypatch.setattr(update.shutil, "which", lambda n: "/usr/bin/catflap-tray")
-    assert update.restart_command(InstallInfo("rpm")) == ["/usr/bin/catflap-tray"]
+    assert update.restart_command(InstallInfo("rpm")) == ["/usr/bin/catflap-tray", "--after-restart"]
 
 
 def test_cli_gateway_add_cloud(manager, monkeypatch, capsys):

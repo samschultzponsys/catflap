@@ -517,7 +517,8 @@ def cmd_adguard(m: Manager, a, out: Out) -> int:
 
 def cmd_tray(m: Manager, a, out: Out) -> int:
     from .tray import main as tray_main
-    return tray_main(["--minimized"] if a.minimized else [])
+    return tray_main((["--minimized"] if a.minimized else [])
+                     + (["--after-restart"] if a.after_restart else []))
 
 
 # ============================================================ parser
@@ -685,6 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_adguard)
     p = sub.add_parser("tray", help="start the tray app")
     p.add_argument("--minimized", action="store_true", help="start hidden in the tray")
+    p.add_argument("--after-restart", action="store_true", help=argparse.SUPPRESS)
     p.set_defaults(fn=cmd_tray)
     return ap
 
