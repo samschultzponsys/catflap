@@ -115,6 +115,18 @@ class MainWindow(QtWidgets.QMainWindow if QtWidgets else object):
         self.a_updates.setCheckable(True)
         self.a_updates.setChecked(self.app.settings.get("update_check", True))
         self.a_updates.toggled.connect(lambda v: self.app.set_setting("update_check", v))
+        try:
+            lists_sites = getattr(self.app.m.backend, "os_vpn_list", False)
+        except Exception:  # noqa: BLE001 - no backend here: nothing to offer
+            lists_sites = False
+        if lists_sites:
+            self.a_keep_entries = sm.addAction("Keep sites in the system's VPN list")
+            self.a_keep_entries.setCheckable(True)
+            self.a_keep_entries.setChecked(self.app.m.keeps_os_entries())
+            self.a_keep_entries.setToolTip(
+                "On: every site is listed in your system's network/VPN menu all the time.\n"
+                "Off: a site is listed there only while it's connected.")
+            self.a_keep_entries.toggled.connect(self.app.set_keep_os_entries)
         sm.addAction("Ask again what the close button does",
                      lambda: self.app.set_setting("close_behavior", "ask"))
         sm.addAction("Check for other VPN software…",
@@ -428,6 +440,9 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self._cycle.timeout.connect(self._cycle_tick)
         self._render()
         self.poll()
+        if not self.m.keeps_os_entries():
+            # Sites disconnected while CatFlap wasn't running (or from the system's menu).
+            run_bg(self.m.tidy_os_entries, lambda r, e: None)
         if self.settings.get("update_check", True):
             # Every start asks GitHub afresh (not yesterday's answer), then every few hours.
             QtCore.QTimer.singleShot(3000, lambda: self.check_updates(interactive=False))
@@ -443,6 +458,16 @@ class TrayApp(QtCore.QObject if QtCore else object):
         self._install_timer.start(self.INSTALL_CHECK_MS)
 
     # -- settings
+    def set_keep_os_entries(self, keep: bool) -> None:
+        def done(problems, err):
+            self.profiles = self.m.store.profiles()
+            if err or problems:
+                QtWidgets.QMessageBox.warning(
+                    self.window, "CatFlap", "Couldn't update every site in the system's VPN list:\n\n"
+                    + (friendly_error(err) if err else "\n".join(problems)))
+            self.poll()
+        run_bg(lambda: self.m.set_keep_os_entries(keep), done)
+
     def set_setting(self, key: str, value: Any) -> None:
         self.settings[key] = value
         self.m.store.save()
@@ -472,6 +497,11 @@ class TrayApp(QtCore.QObject if QtCore else object):
                     st[n] = m.backend.status(p)
                 except Exception:  # noqa: BLE001
                     st[n] = None
+            if not m.keeps_os_entries() and any(
+                    p.backend_id and s is not None and not s.active
+                    for p, s in ((profiles[n], st[n]) for n in profiles)):
+                m.tidy_os_entries()          # e.g. disconnected from the system's own menu
+                profiles = m.store.profiles()
             return profiles, st
         run_bg(work, self._polled)
 

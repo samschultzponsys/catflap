@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import socket
+import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
@@ -53,6 +54,9 @@ class Manager:
         self._backend = backend
         self._driver_factory = driver_factory
         self.resolver: Callable[[str], list[str]] = checks.resolve
+        # Held while a site connects or disconnects, so tidying up hidden system VPN
+        # entries (from the tray's status poll) never removes one a connect just made.
+        self._entries_lock = threading.RLock()
 
     @property
     def backend(self) -> Backend:
@@ -189,8 +193,65 @@ class Manager:
             p.backend_id = self.backend.install(p, cfg)
             p.installed_routes = list(cfg.allowed_ips)
         self.store.put_profile(p)
+        self._hide_entry(p)
         self.store.save()
         return p
+
+    # ======================================================= system VPN list entries
+    KEEP_ENTRIES = "keep_os_vpn_entries"
+
+    def keeps_os_entries(self) -> bool:
+        """True: each site stays in the system's VPN list (NetworkManager) all the time.
+        False: a site's entry exists only while it's connected."""
+        if self.store.settings().get(self.KEEP_ENTRIES, True):
+            return True
+        try:
+            return not getattr(self.backend, "os_vpn_list", False)
+        except Exception:  # noqa: BLE001 - no backend: nothing to hide
+            return True
+
+    def _hide_entry(self, p: Profile) -> None:
+        """Remove a disconnected site's system entry when the user doesn't want them kept.
+        It's re-created (from the stored profile) the next time the site connects."""
+        if self.keeps_os_entries() or not p.backend_id:
+            return
+        if not self._entries_lock.acquire(blocking=False):
+            return                     # a connect is running: leave it be, tidy later
+        try:
+            if self.backend.status(p).active:
+                return
+            self.backend.remove(p)
+        except Exception:  # noqa: BLE001 - only tidying; the next connect re-creates it anyway
+            return
+        finally:
+            self._entries_lock.release()
+        p.backend_id = None
+        p.installed_routes = []
+        self.store.put_profile(p)
+        self.store.save()
+
+    def set_keep_os_entries(self, keep: bool) -> list[str]:
+        """Change the setting and bring every site in line. Returns problems, if any."""
+        self.store.settings()[self.KEEP_ENTRIES] = bool(keep)
+        self.store.save()
+        problems = []
+        for name, p in self.store.profiles().items():
+            try:
+                if keep and not p.backend_id:
+                    self.apply(p)
+                elif not keep:
+                    self._hide_entry(p)
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"{p.display}: {e}")
+        return problems
+
+    def tidy_os_entries(self) -> None:
+        """Remove the entries of disconnected sites when they aren't to be kept (e.g. a
+        site disconnected from the system's own menu, or while CatFlap wasn't running)."""
+        if self.keeps_os_entries():
+            return
+        for p in self.store.profiles().values():
+            self._hide_entry(p)
 
     def _check_new_name(self, name: str, replace: bool) -> Profile | None:
         if not name or netutil.slug(name, 64) != name.lower():
@@ -434,6 +495,7 @@ class Manager:
         p.installed_routes = res.config.allowed_ips
         self.store.put_profile(p)
         self.store.save()
+        self._hide_entry(p)
         return p
 
     # ================================================================ connect
@@ -459,6 +521,10 @@ class Manager:
                 switch: bool = False) -> Outcome:
         """Connect a site. With ``switch``, sites that can't be up at the same time
         (they use the same addresses) are disconnected first."""
+        with self._entries_lock:
+            return self._connect(name, force, keep_on_failure, switch)
+
+    def _connect(self, name: str, force: bool, keep_on_failure: bool, switch: bool) -> Outcome:
         p = self.store.profile(name)
         if self.backend.status(p).active:
             return Outcome(True, [checks.Finding(checks.INFO, "already-up", f"'{name}' is already connected.")], p)
@@ -480,8 +546,8 @@ class Manager:
         if shared:
             routes = [r for r in routes if r not in shared]
             excluded = sorted(set(excluded) | {r.split("/")[0] for r in shared})
-        if routes != (p.installed_routes or p.routes):
-            p = self._install_routes(p, routes)
+        if not p.backend_id or routes != (p.installed_routes or p.routes):
+            p = self._install_routes(p, routes)     # also re-creates a hidden entry
         self.backend.up(p)
         self.backend.wait_active(p, 10)
         target = p.ping_target if p.ping_target not in excluded else None
@@ -491,6 +557,7 @@ class Manager:
         ok = not checks.has_errors(h)
         if not ok and not keep_on_failure:
             self.backend.down(p)
+            self._hide_entry(p)
         return Outcome(ok, findings, p)
 
     def _install_routes(self, p: Profile, routes: list[str]) -> Profile:
@@ -504,7 +571,11 @@ class Manager:
         return p
 
     def disconnect(self, name: str) -> None:
-        self.backend.down(self.store.profile(name))
+        with self._entries_lock:
+            p = self.store.profile(name)
+            if p.backend_id or not getattr(self.backend, "os_vpn_list", False):
+                self.backend.down(p)
+            self._hide_entry(p)
 
     def status(self, name: str | None = None) -> dict[str, TunnelStatus]:
         names = [name] if name else list(self.store.profiles())

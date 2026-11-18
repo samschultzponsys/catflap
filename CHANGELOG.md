@@ -3,6 +3,16 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.4
+
+- **Choose whether sites stay in the system's VPN list (Linux).** CatFlap saves each site as
+  a connection in NetworkManager, so it also shows in your desktop's network/VPN menu, named
+  "catflap ‹site›". That's still the default. Turn off *Settings → Keep sites in the system's
+  VPN list* and a site is listed there only while it's connected: CatFlap removes the entry
+  when you disconnect (or when it notices the site was disconnected from the system's menu)
+  and re-creates it the next time you connect. Not shown on Windows, where CatFlap's tunnels
+  don't appear in a system VPN list.
+
 ## 2.3
 
 - **Check for updates from the tray.** Right-click the tray icon → *Check for updates…*

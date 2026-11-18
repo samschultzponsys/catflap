@@ -55,6 +55,7 @@ def check_settings(s: dict[str, str], profile: Profile) -> list[str]:
 
 class NetworkManagerBackend(Backend):
     name = "networkmanager"
+    os_vpn_list = True
 
     def _nmcli(self, *args: str, check: bool = True) -> str:
         res = self.run(["nmcli", *args])

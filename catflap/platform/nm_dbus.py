@@ -181,6 +181,7 @@ def build_settings(profile: Profile, cfg: PeerConfig, conn_uuid: str) -> dict:
 
 class NetworkManagerDBusBackend(Backend):
     name = "networkmanager-dbus"
+    os_vpn_list = True
 
     def __init__(self, runner=run, bus: Bus | None = None):
         super().__init__(runner)

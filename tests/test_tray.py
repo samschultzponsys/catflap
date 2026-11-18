@@ -844,3 +844,23 @@ def test_tray_check_for_updates_says_when_it_fails(qapp, manager, no_popups):
     shown = len(no_popups)
     app._update_checked(None, OSError("x"), interactive=False)   # background checks stay quiet
     assert len(no_popups) == shown
+
+
+def test_keep_sites_in_system_vpn_list_setting(qapp, manager, backend):
+    backend.os_vpn_list = True
+    manager.provision("home-gw", "home", ["LAN"], device="d")
+    app = tray.TrayApp(qapp, manager)
+    app.timer.stop()
+    act = app.window.a_keep_entries
+    assert act.isChecked()                                  # on by default: keep them
+    act.setChecked(False)
+    wait_for(qapp, lambda: "home" not in backend.installed)
+    assert manager.keeps_os_entries() is False
+    act.setChecked(True)
+    wait_for(qapp, lambda: "home" in backend.installed)
+
+
+def test_no_system_vpn_list_setting_on_windows_style_backend(qapp, manager):
+    app = tray.TrayApp(qapp, manager)
+    app.timer.stop()
+    assert not hasattr(app.window, "a_keep_entries")

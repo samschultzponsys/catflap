@@ -269,3 +269,75 @@ def test_import_merges_with_existing(manager, tmp_path):
     assert len(m2.store.profiles()) == before + 1   # only the still-conflicting "home" again
     m2.import_bundle(text, "correct horse", on_conflict="replace")
     assert m2.store.profile("home").routes[0] == "192.168.1.0/24"        # replaced
+
+
+def _os_list(backend):
+    backend.os_vpn_list = True        # behave like NetworkManager: sites show in the OS VPN list
+    return backend
+
+
+def test_os_vpn_entries_kept_by_default(manager, backend):
+    _os_list(backend)
+    manager.provision("home-gw", "home", ["LAN"], device="d")
+    assert manager.keeps_os_entries()
+    assert manager.connect("home").ok
+    manager.disconnect("home")
+    assert "home" in backend.installed and manager.store.profile("home").backend_id
+
+
+def test_os_vpn_entries_only_while_connected_when_turned_off(manager, backend):
+    _os_list(backend)
+    manager.provision("home-gw", "home", ["LAN"], device="d")
+    assert manager.set_keep_os_entries(False) == []
+    assert "home" not in backend.installed                       # hidden right away
+    assert manager.store.profile("home").backend_id is None
+    assert manager.connect("home").ok                            # re-created to connect
+    assert "home" in backend.installed and "home" in backend.active
+    manager.tidy_os_entries()                                    # connected: left alone
+    assert "home" in backend.installed
+    manager.disconnect("home")
+    assert "home" not in backend.installed and "home" not in backend.active
+    assert manager.connect("home").ok                            # and again
+    backend.active.discard("home")                               # disconnected from the OS menu
+    manager.tidy_os_entries()
+    assert "home" not in backend.installed
+    assert manager.set_keep_os_entries(True) == []               # back on: listed again
+    assert "home" in backend.installed and manager.store.profile("home").backend_id
+
+
+def test_os_vpn_entries_failed_connect_is_hidden_again(manager, backend):
+    _os_list(backend)
+    manager.provision("home-gw", "home", ["LAN"], device="d")
+    manager.set_keep_os_entries(False)
+    backend.rx = 0                                               # no handshake
+    backend.status_tx = 0
+    res = manager.connect("home")
+    assert not res.ok and "home" not in backend.installed
+
+
+def test_os_vpn_entries_tidy_never_races_a_connect(manager, backend):
+    _os_list(backend)
+    manager.provision("home-gw", "home", ["LAN"], device="d")
+    manager.set_keep_os_entries(False)
+    import threading
+    seen = []
+    real_up = backend.up
+
+    def up(profile):
+        poll = threading.Thread(target=manager.tidy_os_entries)   # the tray's poll, mid-connect
+        poll.start()
+        poll.join()
+        seen.append(profile.name in backend.installed)
+        real_up(profile)
+    backend.up = up
+    t = threading.Thread(target=lambda: seen.append(manager.connect("home").ok))
+    t.start()
+    t.join()
+    assert seen == [True, True]
+
+
+def test_windows_style_backend_ignores_the_setting(manager, backend):
+    manager.provision("home-gw", "home", ["LAN"], device="d")
+    manager.set_keep_os_entries(False)
+    assert manager.keeps_os_entries()
+    assert "home" in backend.installed

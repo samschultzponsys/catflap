@@ -1,5 +1,5 @@
 Name:           catflap
-Version:        2.3
+Version:        2.4
 Release:        1%{?dist}
 Summary:        Safe one-click WireGuard remote access to your sites
 License:        Apache-2.0

@@ -71,6 +71,9 @@ class LocalNetwork:
 
 class Backend(abc.ABC):
     name: str = "base"
+    # Its connections show up in the system's own VPN list (NetworkManager), and
+    # can be removed and re-created cheaply (no permission prompt each time).
+    os_vpn_list: bool = False
 
     def __init__(self, runner: Runner = run):
         self.run = runner
