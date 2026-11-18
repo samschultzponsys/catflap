@@ -812,29 +812,74 @@ def test_friendly_timeout_blames_the_router_only_when_one_is_involved():
 
 def test_second_copy_shows_the_first_one_and_exits(qapp, manager, tmp_path, monkeypatch):
     """Starting CatFlap while it runs must not add a second tray icon."""
-    import threading
     name = str(tmp_path / "tray.sock")
     first = tray.TrayApp(qapp, manager)
     shown = []
     monkeypatch.setattr(first, "show_window", lambda: shown.append(1))
     assert tray.claim_single_instance(first, name)
 
-    answered = {}
-    t = threading.Thread(target=lambda: answered.setdefault("show", tray.ask_running_instance(name, b"show")))
-    t.start()
-    wait_for(qapp, lambda: not t.is_alive() and shown)
-    assert answered["show"] is True
+    def in_other_process(expr):
+        # Like a real second start: another process (a QLocalSocket in a plain thread
+        # of this one doesn't reliably get its reply).
+        import subprocess
+        import sys
+        code = ("import os; os.environ['QT_QPA_PLATFORM']='offscreen'; from catflap import tray; "
+                f"name={name!r}; print(repr({expr}))")
+        p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+        wait_for(qapp, lambda: p.poll() is not None, timeout=20)
+        return eval(p.stdout.read().strip())  # noqa: S307 - our own repr()
 
-    # Another copy can't claim it while the first runs...
+    def ask(msg):
+        return in_other_process(f"tray.ask_running_instance(name, {msg!r})")
+
+    assert ask(b"show") == b"ok"
+    wait_for(qapp, lambda: shown)
+
+    # Another copy can't claim it while the first runs.
     second = tray.TrayApp(qapp, manager)
-    assert tray.claim_single_instance(second, name) is False
-    # ...but can once the first has quit (a restart), and nothing answers then.
+    assert in_other_process("tray.wait_for_other_copy(name, b'show', 0)") is False
+    assert len(shown) == 2
+
+    # While the first is quitting it still answers, "quitting", so a restart waits for
+    # the process to really end (Flatpak: both are PID 2 and share a tray-icon name).
     monkeypatch.setattr(first.qapp, "quit", lambda: None)
     first.quit()
-    assert tray.ask_running_instance(name, b"ping", timeout_ms=200) is False
+    assert ask(b"ping-restart") == tray.QUITTING
+    assert ask(b"show") == tray.QUITTING and len(shown) == 2     # no window from a quitting copy
+    first.instance_server.close()                                # the process ends
+    assert tray.ask_running_instance(name, b"ping", timeout_ms=200) is tray.NO_INSTANCE
     assert tray.claim_single_instance(second, name) is True
     second.instance_server.close()
 
+
+class _Clock:
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def test_wait_for_other_copy(monkeypatch):
+    clock = _Clock()
+
+    def run(replies, msg=b"show", wait=10):
+        it = iter(replies)
+        monkeypatch.setattr(tray, "ask_running_instance", lambda name, m: next(it))
+        clock.t = 0.0
+        return tray.wait_for_other_copy("x", msg, wait, sleep=clock.sleep, clock=clock)
+
+    assert run([None]) is True                                    # nothing running: start
+    assert run([b"ok"]) is False                                  # running: it shows its window
+    assert run([tray.QUITTING] * 3 + [None]) is True              # quitting: wait, then start
+    assert run([tray.QUITTING] * 3 + [b"ok"]) is False            # ...someone else won the race
+    assert run([tray.QUITTING] * 100) is True and clock.t >= 10   # hung: start after the wait
+    # An update restart waits for the old copy even while it still says "ok".
+    assert run([b"ok", tray.QUITTING, None], b"ping-restart", 15) is True
+    assert run([b"ok"] * 100, b"ping-restart", 15) is False       # a healthy copy stays alone
 
 def test_tray_check_for_updates_says_when_it_fails(qapp, manager, no_popups):
     app = tray.TrayApp(qapp, manager)

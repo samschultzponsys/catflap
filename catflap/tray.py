@@ -1143,14 +1143,12 @@ class TrayApp(QtCore.QObject if QtCore else object):
         else:
             self.tray.showMessage(title, text, QtWidgets.QSystemTrayIcon.Information, 6000)
 
-    def quit(self, force: bool = False) -> None:
+    def quit(self, force: bool = True) -> None:
         """Quit. ``force``: also end the process within a few seconds even if something
         (a stuck background job) would keep it alive, so a restart never leaves two."""
+        # The single-instance socket stays open until this process has really ended
+        # (it answers "quitting" meanwhile), so a CatFlap started now waits for that.
         self.quitting = True
-        if self.instance_server is not None:
-            # Let a CatFlap started right after this (a restart) take over at once.
-            self.instance_server.close()
-            self.instance_server = None
         self.tray.hide()
         if force and not os.environ.get("CATFLAP_NO_FORCE_EXIT"):
             import threading
@@ -1183,25 +1181,55 @@ def instance_socket_name() -> str:
     return f"catflap-tray-{os.getuid()}"
 
 
-def ask_running_instance(name: str, message: bytes, timeout_ms: int = 1500) -> bool:
-    """Send ``message`` to the CatFlap already running; False if there is none."""
+NO_INSTANCE = None        # ask_running_instance: nothing is listening
+QUITTING = b"quitting"    # ...: a copy is closing down (or hung): wait for it to go
+
+
+def ask_running_instance(name: str, message: bytes, timeout_ms: int = 1500) -> bytes | None:
+    """Send ``message`` to the CatFlap already running. Returns its answer: b"ok" when
+    it's running normally, QUITTING when it's closing down or doesn't answer, or
+    NO_INSTANCE (None) when no CatFlap is running."""
     from PySide6 import QtNetwork
     sock = QtNetwork.QLocalSocket()
     sock.connectToServer(name)
     if not sock.waitForConnected(timeout_ms):
-        return False
+        return NO_INSTANCE
     sock.write(message + b"\n")
     sock.flush()
     sock.waitForBytesWritten(timeout_ms)
-    sock.waitForReadyRead(timeout_ms)       # its "ok", so we know it got the message
+    reply = b""
+    if sock.waitForReadyRead(timeout_ms):
+        reply = bytes(sock.readAll()).strip()
     sock.disconnectFromServer()
-    return True
+    # No answer: its event loop has stopped (it's exiting) or it's stuck.
+    return reply if reply == b"ok" else QUITTING
+
+
+def wait_for_other_copy(name: str, message: bytes, wait_s: float,
+                        sleep=time.sleep, clock=time.monotonic) -> bool:
+    """Before starting: True if this copy should start, False if another CatFlap is
+    running (it was sent ``message``, e.g. to show its window). A copy that is still
+    quitting (an update restart, or Quit then a quick start again) is waited for until
+    its process has really gone: in the Flatpak every copy is process 2, so two at once
+    would both claim the same tray-icon name and the new icon would break."""
+    deadline = clock() + wait_s
+    while True:
+        reply = ask_running_instance(name, message)
+        if reply is NO_INSTANCE:
+            return True
+        if reply == b"ok" and message != b"ping-restart":
+            return False
+        if clock() >= deadline:
+            # Still there after all this time: it's hung. Start anyway (the hung copy
+            # holds the socket, so claim_single_instance replaces it).
+            return reply != b"ok"
+        sleep(0.25)
 
 
 def claim_single_instance(app: "TrayApp", name: str) -> bool:
     """Become the CatFlap that later starts talk to. False if another one holds the name."""
     from PySide6 import QtNetwork
-    if ask_running_instance(name, b"ping"):
+    if ask_running_instance(name, b"ping") == b"ok":
         return False
     # No socket options: with them Qt binds elsewhere and renames over the path, which
     # would silently replace a running copy's socket. The runtime dir is private anyway.
@@ -1216,14 +1244,18 @@ def claim_single_instance(app: "TrayApp", name: str) -> bool:
         while server.hasPendingConnections():
             conn = server.nextPendingConnection()
 
-            def read(c=conn):
-                data = bytes(c.readAll()).strip()
-                c.write(b"ok\n")
+            def read(c=conn, done=[]):  # noqa: B006 - per-connection flag
+                if done or not c.canReadLine():
+                    return
+                done.append(1)
+                data = bytes(c.readLine()).strip()
+                c.write(QUITTING + b"\n" if app.quitting else b"ok\n")
                 c.flush()
                 c.disconnectFromServer()
                 if data == b"show" and not app.quitting:
                     app.show_window()
             conn.readyRead.connect(read)
+            read()      # the message may have arrived before readyRead was connected
     server.newConnection.connect(on_connection)
     app.instance_server = server
     return True
@@ -1241,15 +1273,13 @@ def main(argv: list[str] | None = None) -> int:
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
         print("catflap: no system tray available; showing the window only", file=sys.stderr)
     name = instance_socket_name()
-    deadline = time.monotonic() + (15 if RESTART_FLAG in argv else 0)
-    while True:
+    if RESTART_FLAG in argv:
+        start = wait_for_other_copy(name, b"ping-restart", 15)
+    else:
         # Already running? Bring its window up (unless this is the quiet start at login).
-        quiet = "--minimized" in argv or RESTART_FLAG in argv
-        if not ask_running_instance(name, b"ping" if quiet else b"show"):
-            break
-        if time.monotonic() >= deadline:
-            return 0
-        time.sleep(0.5)     # a restart: the old copy is still quitting
+        start = wait_for_other_copy(name, b"ping" if "--minimized" in argv else b"show", 10)
+    if not start:
+        return 0
     app = TrayApp(qapp)
     claim_single_instance(app, name)
     # Quit cleanly on logout/SIGTERM/Ctrl+C: Python only handles signals while

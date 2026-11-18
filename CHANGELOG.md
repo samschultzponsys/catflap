@@ -3,6 +3,18 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.5
+
+- **Fixed a broken tray icon after updating.** After an update restart, the tray icon could
+  stop working: clicking it made it vanish and come back, and right-click showed only
+  *Quit*. The new CatFlap started while the old one was still closing, and in the Flatpak
+  both claim the same tray-icon name. Now a new CatFlap waits until the old one has really
+  gone (a copy that's closing answers "quitting" until its process ends), and Quit always
+  ends the process within a few seconds. A CatFlap that's stuck and never answers is taken
+  over after 15 seconds instead of blocking every new start.
+- Fixed a race where a second start could reach the running CatFlap before it was ready to
+  read the message; the message is now always read.
+
 ## 2.4
 
 - **Choose whether sites stay in the system's VPN list (Linux).** CatFlap saves each site as
