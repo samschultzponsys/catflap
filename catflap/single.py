@@ -154,6 +154,9 @@ class Server:
                 conn = self._listener.accept()
             except OSError:
                 return
+            if self._listener is None:        # closed while waiting: don't answer
+                conn.close()
+                return
             try:
                 if conn.poll(2):
                     conn.send_bytes(self._answer(conn.recv_bytes(256)))
