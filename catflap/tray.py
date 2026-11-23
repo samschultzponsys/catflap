@@ -28,7 +28,7 @@ import sys
 import time
 from typing import Any
 
-from . import adguard, autostart, checks, update
+from . import adguard, autostart, checks, single, update
 from .core import Manager
 from .drivers import DRIVERS
 from .model import Profile
@@ -1166,19 +1166,7 @@ RESTART_FLAG = update.AFTER_RESTART  # started by a restart: wait for the old co
 
 
 def instance_socket_name() -> str:
-    if sys.platform == "win32":
-        import getpass
-        return f"catflap-tray-{getpass.getuser()}"
-    run = os.environ.get("XDG_RUNTIME_DIR", "")
-    app_dir = os.path.join(run, "app", os.environ.get("FLATPAK_ID", ""))
-    path = ""
-    if run and os.environ.get("FLATPAK_ID") and os.path.isdir(app_dir):
-        path = os.path.join(app_dir, "tray.sock")   # shared by every copy of the Flatpak
-    elif run and os.path.isdir(run):
-        path = os.path.join(run, "catflap-tray.sock")
-    if path and len(path.encode()) < 100:           # Unix sockets: paths up to ~107 bytes
-        return path
-    return f"catflap-tray-{os.getuid()}"
+    return single.default_name()
 
 
 NO_INSTANCE = None        # ask_running_instance: nothing is listening
@@ -1186,22 +1174,12 @@ QUITTING = b"quitting"    # ...: a copy is closing down (or hung): wait for it t
 
 
 def ask_running_instance(name: str, message: bytes, timeout_ms: int = 1500) -> bytes | None:
-    """Send ``message`` to the CatFlap already running. Returns its answer: b"ok" when
-    it's running normally, QUITTING when it's closing down or doesn't answer, or
-    NO_INSTANCE (None) when no CatFlap is running."""
-    from PySide6 import QtNetwork
-    sock = QtNetwork.QLocalSocket()
-    sock.connectToServer(name)
-    if not sock.waitForConnected(timeout_ms):
+    """Send ``message`` to the CatFlap already running. Returns its answer: b"ok <version>"
+    when it's running normally, QUITTING when it's closing down, stuck or doesn't
+    answer, or NO_INSTANCE (None) when no CatFlap is running."""
+    reply = single.ask(name, message, timeout_ms / 1000)
+    if reply is None:
         return NO_INSTANCE
-    sock.write(message + b"\n")
-    sock.flush()
-    sock.waitForBytesWritten(timeout_ms)
-    reply = b""
-    if sock.waitForReadyRead(timeout_ms):
-        reply = bytes(sock.readAll()).strip()
-    sock.disconnectFromServer()
-    # No answer: its event loop has stopped (it's exiting) or it's stuck.
     return reply if is_running_reply(reply) else QUITTING
 
 
@@ -1236,37 +1214,42 @@ def wait_for_other_copy(name: str, message: bytes, wait_s: float,
         sleep(0.25)
 
 
+HEARTBEAT_S = 1.0     # the UI thread ticks this often...
+STUCK_S = 6.0         # ...and a copy whose UI hasn't ticked for this long counts as stuck
+
+
+class _ShowRequest(QtCore.QObject if QtCore else object):
+    """Carries "show the window" from the listener thread to the UI thread."""
+    if QtCore:
+        requested = QtCore.Signal()
+
+
 def claim_single_instance(app: "TrayApp", name: str) -> bool:
-    """Become the CatFlap that later starts talk to. False if another one holds the name."""
-    from PySide6 import QtNetwork
+    """Become the CatFlap that later starts talk to. False if another one holds the name.
+    The listener runs on its own thread; it answers "quitting" while this copy is
+    closing down (until the process has ended) or when its UI thread is stuck."""
     if is_running_reply(ask_running_instance(name, b"ping")):
         return False
-    # No socket options: with them Qt binds elsewhere and renames over the path, which
-    # would silently replace a running copy's socket. The runtime dir is private anyway.
-    server = QtNetwork.QLocalServer(app)
-    if not server.listen(name):
-        QtNetwork.QLocalServer.removeServer(name)    # left behind by a copy that crashed
-        if not server.listen(name):
-            print(f"catflap: can't watch for a second copy ({server.errorString()})", file=sys.stderr)
+    beat = {"t": time.monotonic()}
+    timer = QtCore.QTimer(app)
+    timer.timeout.connect(lambda: beat.__setitem__("t", time.monotonic()))
+    timer.start(int(HEARTBEAT_S * 1000))
+    shower = _ShowRequest(app)
+    shower.requested.connect(app.show_window)
+
+    def handle(msg: bytes) -> bytes:
+        if app.quitting or time.monotonic() - beat["t"] > STUCK_S:
+            return QUITTING
+        if msg == b"show":
+            shower.requested.emit()          # queued onto the UI thread
+        return b"ok " + __version__.encode()
+
+    server = single.Server(name, handle)
+    if not server.listen():
+        server.remove_stale()               # left behind by a copy that crashed or hung
+        if not server.listen():
+            print(f"catflap: can't watch for a second copy of CatFlap at {name!r}", file=sys.stderr)
             return True
-
-    def on_connection():
-        while server.hasPendingConnections():
-            conn = server.nextPendingConnection()
-
-            def read(c=conn, done=[]):  # noqa: B006 - per-connection flag
-                if done or not c.canReadLine():
-                    return
-                done.append(1)
-                data = bytes(c.readLine()).strip()
-                c.write(QUITTING + b"\n" if app.quitting else b"ok " + __version__.encode() + b"\n")
-                c.flush()
-                c.disconnectFromServer()
-                if data == b"show" and not app.quitting:
-                    app.show_window()
-            conn.readyRead.connect(read)
-            read()      # the message may have arrived before readyRead was connected
-    server.newConnection.connect(on_connection)
     app.instance_server = server
     return True
 
@@ -1299,7 +1282,8 @@ def explain_other_copy(reply: bytes, quiet: bool = False) -> None:
     text = other_copy_text(reply)
     v = reply_version(reply) or "older version"
     print(f"catflap: CatFlap is already running ({v}); "
-          + ("showing its window" if text is None else "it has to be closed first"), file=sys.stderr)
+          + (("not starting another" if quiet else "showing its window") if text is None
+             else "it has to be closed first"), file=sys.stderr)
     if text is not None:
         print(text, file=sys.stderr)
         if not quiet:
@@ -1320,16 +1304,24 @@ def main(argv: list[str] | None = None) -> int:
     if not QtWidgets.QSystemTrayIcon.isSystemTrayAvailable():
         print("catflap: no system tray available; showing the window only", file=sys.stderr)
     name = instance_socket_name()
-    if RESTART_FLAG in argv:
-        other = wait_for_other_copy(name, b"ping-restart", 15)
-    else:
-        # Already running? Bring its window up (unless this is the quiet start at login).
-        other = wait_for_other_copy(name, b"ping" if "--minimized" in argv else b"show", 10)
+    try:
+        if RESTART_FLAG in argv:
+            other = wait_for_other_copy(name, b"ping-restart", 15)
+        else:
+            # Already running? Bring its window up (unless this is the quiet start at login).
+            other = wait_for_other_copy(name, b"ping" if "--minimized" in argv else b"show", 10)
+    except Exception as e:  # noqa: BLE001 - the one-copy check must never stop CatFlap starting
+        print(f"catflap: couldn't check for another running CatFlap ({e}); starting anyway",
+              file=sys.stderr)
+        other = None
     if other is not None:
         explain_other_copy(other, quiet="--minimized" in argv)
         return 0
     app = TrayApp(qapp)
-    claim_single_instance(app, name)
+    try:
+        claim_single_instance(app, name)
+    except Exception as e:  # noqa: BLE001
+        print(f"catflap: can't watch for a second copy of CatFlap ({e})", file=sys.stderr)
     # Quit cleanly on logout/SIGTERM/Ctrl+C: Python only handles signals while
     # it runs, so wake the interpreter regularly.
     import signal

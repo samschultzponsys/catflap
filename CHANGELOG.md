@@ -3,6 +3,14 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.7
+
+- **The Flatpak opens again.** Since 2.2 the Flatpak crashed as it started (`cannot import
+  name 'QtNetwork'`): the check that keeps CatFlap to one copy used a part of Qt that the
+  Flatpak's Qt doesn't include. It now uses Python's own Unix socket (a named pipe on
+  Windows), and if that check fails for any reason CatFlap starts anyway instead of
+  crashing. A copy whose window has stopped responding is no longer treated as running.
+
 ## 2.6
 
 - **CatFlap no longer silently refuses to open.** When an older CatFlap was still running in
