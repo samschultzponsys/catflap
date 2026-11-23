@@ -832,12 +832,12 @@ def test_second_copy_shows_the_first_one_and_exits(qapp, manager, tmp_path, monk
     def ask(msg):
         return in_other_process(f"tray.ask_running_instance(name, {msg!r})")
 
-    assert ask(b"show") == b"ok"
+    assert ask(b"show") == b"ok " + tray.__version__.encode()
     wait_for(qapp, lambda: shown)
 
     # Another copy can't claim it while the first runs.
     second = tray.TrayApp(qapp, manager)
-    assert in_other_process("tray.wait_for_other_copy(name, b'show', 0)") is False
+    assert tray.is_running_reply(in_other_process("tray.wait_for_other_copy(name, b'show', 0)"))
     assert len(shown) == 2
 
     # While the first is quitting it still answers, "quitting", so a restart waits for
@@ -872,14 +872,27 @@ def test_wait_for_other_copy(monkeypatch):
         clock.t = 0.0
         return tray.wait_for_other_copy("x", msg, wait, sleep=clock.sleep, clock=clock)
 
-    assert run([None]) is True                                    # nothing running: start
-    assert run([b"ok"]) is False                                  # running: it shows its window
-    assert run([tray.QUITTING] * 3 + [None]) is True              # quitting: wait, then start
-    assert run([tray.QUITTING] * 3 + [b"ok"]) is False            # ...someone else won the race
-    assert run([tray.QUITTING] * 100) is True and clock.t >= 10   # hung: start after the wait
+    ok = b"ok 2.6"
+    assert run([None]) is None                                    # nothing running: start
+    assert run([ok]) == ok                                        # running: it shows its window
+    assert run([b"ok"]) == b"ok"                                  # ...an older one (2.2-2.5) too
+    assert run([tray.QUITTING] * 3 + [None]) is None              # quitting: wait, then start
+    assert run([tray.QUITTING] * 3 + [ok]) == ok                  # ...someone else won the race
+    assert run([tray.QUITTING] * 100) is None and clock.t >= 10   # hung: start after the wait
     # An update restart waits for the old copy even while it still says "ok".
-    assert run([b"ok", tray.QUITTING, None], b"ping-restart", 15) is True
-    assert run([b"ok"] * 100, b"ping-restart", 15) is False       # a healthy copy stays alone
+    assert run([ok, tray.QUITTING, None], b"ping-restart", 15) is None
+    assert run([ok] * 100, b"ping-restart", 15) == ok             # a healthy copy stays alone
+
+
+def test_explains_when_an_older_copy_is_in_the_way(monkeypatch):
+    monkeypatch.setattr(tray, "__version__", "2.6")
+    monkeypatch.setenv("FLATPAK_ID", "io.github.samschultzponsys.CatFlap")
+    assert tray.other_copy_text(b"ok 2.6") is None                # same version: it shows itself
+    assert tray.other_copy_text(b"ok 2.7") is None                # newer: same
+    text = tray.other_copy_text(b"ok 2.5")
+    assert "CatFlap 2.5 is still running" in text and "flatpak kill io.github.samschultzponsys.CatFlap" in text
+    assert "An older CatFlap is still running" in tray.other_copy_text(b"ok")   # 2.2-2.5 don't say
+    assert tray.reply_version(b"ok 2.6") == "2.6" and tray.reply_version(b"ok") is None
 
 def test_tray_check_for_updates_says_when_it_fails(qapp, manager, no_popups):
     app = tray.TrayApp(qapp, manager)

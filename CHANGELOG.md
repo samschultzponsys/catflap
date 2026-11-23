@@ -3,6 +3,15 @@
 Versions are `MAJOR.MINOR`; the minor number runs 0–9 and then rolls over
 (1.9 → 2.0). Every release is tagged `vMAJOR.MINOR`.
 
+## 2.6
+
+- **CatFlap no longer silently refuses to open.** When an older CatFlap was still running in
+  the background (for example one whose tray icon broke), starting CatFlap did nothing at
+  all: it handed over to the old copy, which couldn't show anything. Now it says which
+  version is in the way and how to close it (*Quit* from its tray icon, or
+  `flatpak kill io.github.samschultzponsys.CatFlap`). A running CatFlap now reports its
+  version, so this only happens when the copy in the way is older.
+
 ## 2.5
 
 - **Fixed a broken tray icon after updating.** After an update restart, the tray icon could

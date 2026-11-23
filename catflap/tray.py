@@ -1202,13 +1202,23 @@ def ask_running_instance(name: str, message: bytes, timeout_ms: int = 1500) -> b
         reply = bytes(sock.readAll()).strip()
     sock.disconnectFromServer()
     # No answer: its event loop has stopped (it's exiting) or it's stuck.
-    return reply if reply == b"ok" else QUITTING
+    return reply if is_running_reply(reply) else QUITTING
+
+
+def is_running_reply(reply: bytes | None) -> bool:
+    """b"ok <version>" (2.6+) or a bare b"ok" (2.2-2.5): a copy running normally."""
+    return reply is not None and (reply == b"ok" or reply.startswith(b"ok "))
+
+
+def reply_version(reply: bytes) -> str | None:
+    """The running copy's version from its answer, or None if it's too old to say."""
+    return reply[3:].decode(errors="replace").strip() or None if reply.startswith(b"ok ") else None
 
 
 def wait_for_other_copy(name: str, message: bytes, wait_s: float,
-                        sleep=time.sleep, clock=time.monotonic) -> bool:
-    """Before starting: True if this copy should start, False if another CatFlap is
-    running (it was sent ``message``, e.g. to show its window). A copy that is still
+                        sleep=time.sleep, clock=time.monotonic) -> bytes | None:
+    """Before starting: None if this copy should start, or the answer of the CatFlap
+    that's already running (it was sent ``message``, e.g. to show its window). A copy that is still
     quitting (an update restart, or Quit then a quick start again) is waited for until
     its process has really gone: in the Flatpak every copy is process 2, so two at once
     would both claim the same tray-icon name and the new icon would break."""
@@ -1216,20 +1226,20 @@ def wait_for_other_copy(name: str, message: bytes, wait_s: float,
     while True:
         reply = ask_running_instance(name, message)
         if reply is NO_INSTANCE:
-            return True
-        if reply == b"ok" and message != b"ping-restart":
-            return False
+            return None
+        if is_running_reply(reply) and message != b"ping-restart":
+            return reply
         if clock() >= deadline:
-            # Still there after all this time: it's hung. Start anyway (the hung copy
-            # holds the socket, so claim_single_instance replaces it).
-            return reply != b"ok"
+            # Still there after all this time: if it never answers it's hung, so start
+            # anyway (claim_single_instance takes its socket over).
+            return reply if is_running_reply(reply) else None
         sleep(0.25)
 
 
 def claim_single_instance(app: "TrayApp", name: str) -> bool:
     """Become the CatFlap that later starts talk to. False if another one holds the name."""
     from PySide6 import QtNetwork
-    if ask_running_instance(name, b"ping") == b"ok":
+    if is_running_reply(ask_running_instance(name, b"ping")):
         return False
     # No socket options: with them Qt binds elsewhere and renames over the path, which
     # would silently replace a running copy's socket. The runtime dir is private anyway.
@@ -1249,7 +1259,7 @@ def claim_single_instance(app: "TrayApp", name: str) -> bool:
                     return
                 done.append(1)
                 data = bytes(c.readLine()).strip()
-                c.write(QUITTING + b"\n" if app.quitting else b"ok\n")
+                c.write(QUITTING + b"\n" if app.quitting else b"ok " + __version__.encode() + b"\n")
                 c.flush()
                 c.disconnectFromServer()
                 if data == b"show" and not app.quitting:
@@ -1259,6 +1269,43 @@ def claim_single_instance(app: "TrayApp", name: str) -> bool:
     server.newConnection.connect(on_connection)
     app.instance_server = server
     return True
+
+
+def other_copy_text(reply: bytes) -> str | None:
+    """Why this CatFlap isn't starting, when the one in the way is older (or too old to
+    say its version); None when it's the same or a newer version (it shows its window)."""
+    from .version import is_newer
+    theirs = reply_version(reply)
+    try:
+        if theirs and not is_newer(__version__, theirs):
+            return None
+    except ValueError:
+        pass
+    which = f"CatFlap {theirs}" if theirs else "an older CatFlap"
+    if os.environ.get("FLATPAK_ID"):
+        cmd = f"flatpak kill {os.environ['FLATPAK_ID']}"
+    elif sys.platform == "win32":
+        cmd = "taskkill /im CatFlap.exe /f"
+    else:
+        cmd = "pkill -f catflap-tray"
+    return (f"{which[0].upper() + which[1:]} is still running, so CatFlap {__version__} can't "
+            "start. It may have no working tray icon.\n\n"
+            "If you can see its tray icon, right-click it and choose Quit. Otherwise close it "
+            f"with this command in a terminal:\n\n    {cmd}\n\n"
+            "Then start CatFlap again. (Connected sites stay connected.)")
+
+
+def explain_other_copy(reply: bytes, quiet: bool = False) -> None:
+    text = other_copy_text(reply)
+    v = reply_version(reply) or "older version"
+    print(f"catflap: CatFlap is already running ({v}); "
+          + ("showing its window" if text is None else "it has to be closed first"), file=sys.stderr)
+    if text is not None:
+        print(text, file=sys.stderr)
+        if not quiet:
+            box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Warning, "CatFlap", text)
+            box.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            box.exec()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1274,11 +1321,12 @@ def main(argv: list[str] | None = None) -> int:
         print("catflap: no system tray available; showing the window only", file=sys.stderr)
     name = instance_socket_name()
     if RESTART_FLAG in argv:
-        start = wait_for_other_copy(name, b"ping-restart", 15)
+        other = wait_for_other_copy(name, b"ping-restart", 15)
     else:
         # Already running? Bring its window up (unless this is the quiet start at login).
-        start = wait_for_other_copy(name, b"ping" if "--minimized" in argv else b"show", 10)
-    if not start:
+        other = wait_for_other_copy(name, b"ping" if "--minimized" in argv else b"show", 10)
+    if other is not None:
+        explain_other_copy(other, quiet="--minimized" in argv)
         return 0
     app = TrayApp(qapp)
     claim_single_instance(app, name)
