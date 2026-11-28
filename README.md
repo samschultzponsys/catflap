@@ -8,7 +8,8 @@
 UniFi · TP-Link Omada · Alta Labs · any WireGuard router</p>
 
 A self-hosted, vendor-neutral replacement for UniFi Teleport / WiFiman Desktop
-that works on **Linux** (Fedora KDE first, Debian next) and, later, **Windows**.
+that works on **Linux** (Fedora, Debian, Ubuntu and other distributions with
+NetworkManager) and **Windows 10/11**.
 
 CatFlap turns *"I want remote access to site X"* into a split-tunnel WireGuard
 connection with safe defaults. It works with **UniFi**, **TP-Link Omada**,
@@ -63,17 +64,25 @@ from the UniFi UI and use `catflap import` instead. Every safety rule still appl
 
 | Platform | Backend | Status |
 |---|---|---|
-| Fedora (KDE Plasma, Wayland) | NetworkManager (nmcli, or D-Bus inside the Flatpak) | primary; Flatpak recommended |
-| Debian / Ubuntu | NetworkManager | supported |
-| Windows 10/11 | WireGuard's tunnel service (engine only, no WireGuard app) | preview; tested automatically on Windows, real-PC testing in progress |
+| Fedora (KDE Plasma, Wayland) | NetworkManager (nmcli, or D-Bus inside the Flatpak) | supported: Flatpak (recommended) or RPM |
+| Debian / Ubuntu | NetworkManager (nmcli, or D-Bus inside the Flatpak) | supported: Flatpak (recommended) or pipx. There's no `.deb` package yet |
+| Other Linux with NetworkManager | NetworkManager, through the Flatpak | should work: the Flatpak brings everything it needs |
+| Windows 10/11 | WireGuard's tunnel service (engine only, no WireGuard app) | supported: installer (`setup.exe`) |
 
 ## Install
 
-Releases appear on the [releases page](https://github.com/samschultzponsys/vpn-catflap/releases)
-once a version tag (e.g. `v0.1`) has been pushed. Each release has a Flatpak bundle,
-an RPM and a Python wheel.
+Every version is published on the [releases page](https://github.com/samschultzponsys/vpn-catflap/releases)
+as soon as it's ready. Each release has a Flatpak bundle (any Linux), an RPM (Fedora),
+a Python wheel (pipx/pip, e.g. Debian and Ubuntu) and a Windows installer.
 
-### Fedora: Flatpak (recommended)
+### Linux: Flatpak (recommended)
+
+Works the same on Fedora, Debian, Ubuntu and other distributions. Fedora has
+Flatpak already; on Debian or Ubuntu install it first:
+
+```bash
+sudo apt install flatpak
+```
 
 **From a release** (Flathub is used for the KDE runtime and PySide):
 
@@ -95,6 +104,8 @@ SDK download the first time):
 ```bash
 sudo dnf install flatpak-builder git
 ```
+
+(Debian/Ubuntu: `sudo apt install flatpak-builder git`.)
 
 ```bash
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
@@ -144,7 +155,9 @@ sudo dnf install https://github.com/samschultzponsys/vpn-catflap/releases/downlo
 
 The RPM also installs PySide6 (for the tray) and wireguard-tools as recommended packages.
 
-**Debian / Ubuntu (until the .deb is ready):**
+### Debian / Ubuntu: pipx
+
+The Flatpak above is the easiest way. To install with your system's Python instead:
 
 ```bash
 sudo apt install network-manager python3-keyring python3-cryptography python3-pyside6.qtwidgets pipx
@@ -154,7 +167,7 @@ sudo apt install network-manager python3-keyring python3-cryptography python3-py
 pipx install --system-site-packages https://github.com/samschultzponsys/vpn-catflap/releases/download/v<version>/catflap-<version>-py3-none-any.whl
 ```
 
-### Windows (preview)
+### Windows 10/11
 
 1. Download `catflap-<version>-setup.exe` from the
    [releases page](https://github.com/samschultzponsys/vpn-catflap/releases) and run it.
@@ -198,8 +211,6 @@ pipx install --system-site-packages https://github.com/samschultzponsys/vpn-catf
   and CatFlap reopens as the new version.
 - The command line is `catflap-cli.exe` in the install folder. Windows file names
   ignore case, so it can't also be called `catflap.exe` next to `CatFlap.exe`.
-
-The Windows version is new. Please report anything that doesn't work.
 
 **From source:**
 
@@ -618,8 +629,9 @@ button. With no sites yet, it shows a big **Add your first site** button.
   - **Left-click** shows or hides the window.
   - **Right-click** lists your sites with their status. Click one to connect or
     disconnect it; each shows a short status (*Connected*, *Not connected*,
-    *You're here*…). The menu also has **Add a site…**, **Open CatFlap** and
-    **Quit**.
+    *You're here*…). The menu also has **Add a site…**, **Open CatFlap**,
+    **Check for updates…** (it reads **Update to X.Y…** once a newer version is
+    known) and **Quit**.
 - **Notifications** on connect, disconnect and failure, with the reason in plain words.
 
 ### AdGuard Ad Blocking (Linux)
@@ -733,8 +745,9 @@ the gateway's address to AdGuard's HTTPS exclusions.
   **Keep running in tray** or **Quit CatFlap**, with *Remember my choice*.
   **Settings → Ask again what the close button does** brings the question back.
   Connected sites stay connected either way.
-- **Settings:** *Start CatFlap when I log in*, *Check for updates automatically*, and
-  on Linux **AdGuard Ad Blocking ▸** (*Show AdGuard's status on the tray icon*, *Check
+- **Settings:** *Start CatFlap when I log in*, *Check for updates automatically*,
+  on Linux *Keep sites in the system's VPN list* (see below), and
+  **AdGuard Ad Blocking ▸** (*Show AdGuard's status on the tray icon*, *Check
   HTTPS filtering…*, *Exclude an app from HTTPS filtering…*).
 - **File:** *Export everything…* and *Import from another computer…* (locked with
   a passphrase).
@@ -742,6 +755,21 @@ the gateway's address to AdGuard's HTTPS exclusions.
   CatFlap was installed**).
 
 The window picks up changes made with the command line within a few seconds.
+
+**Keep sites in the system's VPN list** (Linux, on by default). CatFlap saves each site
+as a NetworkManager connection named *catflap ‹site›*, so it also appears in your
+desktop's network/VPN menu. These connections never start on their own. Connecting from
+the system menu works, but skips CatFlap's checks (already on site, same addresses as
+the network you're on, sites that clash), so prefer CatFlap. Turn this setting off and
+a site is listed there only while it's connected: CatFlap removes the entry when you
+disconnect (or when it notices the site was disconnected elsewhere) and re-creates it
+the next time you connect. Quitting CatFlap doesn't disconnect anything. Windows tunnels
+never appear in a system VPN list, so the setting isn't shown there.
+
+**One CatFlap at a time.** Starting CatFlap while it's already running (from the app
+menu, or again at login) just opens the running one's window. If the copy that's
+running is an older version, the new one says so and how to close it (*Quit* from its
+tray icon, or `flatpak kill io.github.samschultzponsys.CatFlap`).
 
 ## Command reference
 
@@ -839,7 +867,7 @@ ever sees the public key.
 | Installed via | Automatic update | Manual command |
 |---|---|---|
 | RPM | `pkexec dnf install <release rpm>` | `sudo dnf install <release rpm URL>` |
-| .deb | `pkexec apt-get install ./<deb>` | `sudo apt install ./catflap_<v>_all.deb` |
+| .deb (none published yet) | `pkexec apt-get install ./<deb>` | `sudo apt install ./catflap_<v>_all.deb` |
 | Flatpak | downloads the new bundle to `~/Downloads`; installs it too if you allowed it (below) | `flatpak install --user -y ~/Downloads/catflap-<v>.flatpak` |
 | pipx | `pipx install --force <wheel>` | same |
 | pip | `pip install --upgrade <wheel>` | same |
@@ -862,9 +890,9 @@ tells you if the update wasn't installed yet.
 
 **Installed some other way?** CatFlap checks every minute whether a newer version was
 installed (by a command in a terminal, Discover or dnf, with or without the update
-window open) and restarts into it by itself, with a short notification. On Linux
-the old copy always ends and the new one starts a couple of seconds later, so the
-tray icon comes back reliably.
+window open) and restarts into it by itself, with a short notification. The new copy
+waits until the old one has completely exited before it starts, so the tray icon comes
+back reliably.
 
 **Flatpak specifics.** A sandboxed app can't install updates on the host by
 itself, so **Download and install** downloads `catflap-<v>.flatpak` to
@@ -974,6 +1002,9 @@ tunnels or a local network routing the same addresses) and tells you which one.
 | *AdGuard's HTTPS filtering is intercepting the connection to …* | Exclude CatFlap from AdGuard's HTTPS filtering (Linux: tray → AdGuard → Check HTTPS filtering…, or `catflap adguard exclude 'python3*'`; Windows: in AdGuard, turn off HTTPS filtering for `catflap.exe`) |
 | Sites or apps show certificate errors with AdGuard's HTTPS filtering on | Tray → AdGuard → **Check HTTPS filtering…** and use the Fix buttons; see [HTTPS filtering](#https-filtering) |
 | The taskbar or app menu still shows an old CatFlap icon | Fixed from 0.8: the launcher's icon name changes whenever the artwork does, so KDE's icon cache can't reuse an old one. For older versions: `rm -f ~/.cache/icon-cache.kcache`, then log out and back in |
+| *NetworkManager on this computer didn't reply* | A problem on this computer, not at the site: click Connect again; if it fails again, Quit CatFlap and start it again; if it still fails, `sudo systemctl restart NetworkManager` or sign out and back in. (Before 2.2 this wrongly said *the router didn't answer in time*) |
+| *CatFlap X is still running, so CatFlap Y can't start* | An older copy is running in the background. Right-click its tray icon → **Quit**, or `flatpak kill io.github.samschultzponsys.CatFlap`, then start CatFlap again |
+| The Flatpak doesn't open (`cannot import name 'QtNetwork'` when started from a terminal) | Fixed in 2.7; versions 2.2 to 2.6 crash as they start. Install the 2.7 or later `.flatpak` from the releases page (`flatpak install --user -y catflap-<v>.flatpak`) |
 | *NetworkManager did not keep the safe settings* | An NM plugin or policy overrode them; the connection was removed for safety. Please file a bug |
 
 ## CGNAT sites

@@ -182,5 +182,5 @@ jobs:
           v="${{ needs.meta.outputs.version }}"
           ls -la out
           notes=$(awk -v h="## $v" '$0==h{f=1;next} /^## /{f=0} f' CHANGELOG.md)
-          notes="${notes}"$'\n\n'"**Windows:** catflap-$v-setup.exe is a preview. It can download WireGuard's engine from wireguard.com (you can untick it); the WireGuard app itself isn't installed."
+          notes="${notes}"$'\n\n'"**Windows:** catflap-$v-setup.exe can download WireGuard's engine from wireguard.com (you can untick it); the WireGuard app itself isn't installed."
           gh release create "v$v" out/* --target "$GITHUB_SHA" --title "CatFlap $v" --notes "${notes:-See CHANGELOG.md}"
