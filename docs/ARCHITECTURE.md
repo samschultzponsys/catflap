@@ -110,7 +110,7 @@ private key in the same response.
   `GetSettings` and applies the same `check_settings()` verification as the nmcli
   backend. Local routes and addresses come from each device's `IP4Config`, and
   pings use an unprivileged ICMP socket.
-- **Windows** (preview): WireGuard's documented *tunnel service* mode, without
+- **Windows**: WireGuard's documented *tunnel service* mode, without
   the WireGuard app. The official signed MSI is downloaded from
   download.wireguard.com (by the installer, or by the app when missing) and, in the
   first site's elevated step, extracted with `msiexec /a` (never installed, so no

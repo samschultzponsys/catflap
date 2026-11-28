@@ -28,8 +28,8 @@ How a site works on Windows:
 * **Repairs:** if a site's service or the program it runs is gone (for example
   after uninstalling WireGuard for Windows), connecting sets it up again.
 
-Status: preview. Written against the WireGuard for Windows docs; needs testing on
-real Windows machines.
+Status: supported. Tested automatically on Windows for every release (including a
+smoke test of the tunnel service) and in everyday use on real Windows PCs.
 """
 
 from __future__ import annotations
